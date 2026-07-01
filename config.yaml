@@ -43,6 +43,12 @@ clean:
   min_rating: 400                # drop implausible/corrupt Elo labels below this
   max_rating: 4000               # ...or above this (Lichess blitz tops out ~3100)
 
+# --- Feature engineering (Stage 4) ---
+features:
+  fast_move_seconds: 1.0         # a move played faster than this counts as "very fast"
+  time_trouble_seconds: 15       # remaining clock below this counts as time trouble
+  winning_winpct: 80             # Win% at/above which a position is "winning" (conversion feature)
+
 # --- Paths ---
 paths:
   raw: data/raw
@@ -53,3 +59,4 @@ outputs:
   blitz_sample: data/processed/blitz_sample.parquet   # Stage 1 (ingest)
   games_clean: data/processed/games_clean.parquet     # Stage 2 (clean/dedup)
   instances: data/processed/instances.parquet         # Stage 3 (2 rows/game, per-player labels)
+  features: data/processed/features.parquet           # Stage 4 (per-player feature vectors)

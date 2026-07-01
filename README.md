@@ -51,7 +51,7 @@ parallel against the interface (not by reading each other's code).
 |---|---|---|---|
 | 1 | `python -m src.ingest` | `data/raw/lichess_db_standard_rated_<month>.pgn.zst` | `data/processed/blitz_sample.parquet` |
 | 2–3 | `python -m src.clean` | `blitz_sample.parquet` | `games_clean.parquet`, `instances.parquet` |
-| 4 | `python -m src.features` *(later)* | `instances.parquet` + `games_clean.parquet` | `features.parquet` |
+| 4 | `python -m src.features` | `games_clean.parquet` + `instances.parquet` | `features.parquet` |
 | 5 | notebooks `01`→`04` *(later)* | `features.parquet` | figures + `reports/results.md` |
 
 **Sanity gate:** run `pytest` before every push (math regression + the fixture smoke test).
@@ -115,6 +115,25 @@ split train/test by `username` (GroupKFold / grouped hold-out), never by game.
 
 > **Provisional ratings** stay unfiltered here — the status isn't in exported PGN, so `config.yaml`'s
 > `drop_provisional` is a documented no-op (see Limitations).
+
+## `features.parquet` (Stage 4)
+
+`src/features.py` parses each game once and emits **one row per instance** (`game_id, color,
+username, rating, result, time_control, eco, opening` + ~60 numeric features). Built on the verified
+`win_percent`/`accuracy_percent`/`classify_move` primitives; every quality feature is computed
+overall **and** per phase (`opening_` / `middlegame_` / `endgame_`). Feature groups:
+
+- **Move quality:** `cpl_{mean,median,std,max}` (centipawn loss), `acc_mean` (Lichess Accuracy%),
+  `{inaccuracy,mistake,blunder}_{count,rate}`, and `acc_after_book` (post-opening accuracy — the
+  "knew theory, then collapsed" signal). Move class thresholds are on the winningChances scale.
+- **Time:** `move_time_{mean,std,median}` from `[%clk]` deltas, `fast_move_share`, `time_trouble_share`.
+- **Style:** `game_plies`, `player_moves`, `n_captures`, `n_checks`, `reached_winning`,
+  `converted_winning` (did they win from a winning position?).
+
+Same leakage guarantee: the eval before/after a move is taken from *this* player's POV only; no
+opponent-derived quantity enters a feature. Cross-game aggregates (opening-diversity entropy, the
+per-K aggregation curve) are deliberately **not** here — they belong to evaluation (Stage 7), since a
+single-game prediction can't see a player's other games.
 
 ---
 
