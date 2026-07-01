@@ -38,6 +38,11 @@ phases:
   opening_max_ply: 30            # ~15 full moves; opening lasts until out of book or this ply
   endgame_nonpawn_pieces: 6      # middlegame -> endgame when total non-pawn pieces (both sides) <= this
 
+# --- Cleaning (Stage 2) ---
+clean:
+  min_rating: 400                # drop implausible/corrupt Elo labels below this
+  max_rating: 4000               # ...or above this (Lichess blitz tops out ~3100)
+
 # --- Paths ---
 paths:
   raw: data/raw
@@ -45,4 +50,6 @@ paths:
   figures: reports/figures
 
 outputs:
-  blitz_sample: data/processed/blitz_sample.parquet
+  blitz_sample: data/processed/blitz_sample.parquet   # Stage 1 (ingest)
+  games_clean: data/processed/games_clean.parquet     # Stage 2 (clean/dedup)
+  instances: data/processed/instances.parquet         # Stage 3 (2 rows/game, per-player labels)

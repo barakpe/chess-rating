@@ -50,9 +50,9 @@ parallel against the interface (not by reading each other's code).
 | # | Command | Input | Output |
 |---|---|---|---|
 | 1 | `python -m src.ingest` | `data/raw/lichess_db_standard_rated_<month>.pgn.zst` | `data/processed/blitz_sample.parquet` |
-| 2 | `python -m src.clean` *(later)* | `blitz_sample.parquet` | `games_clean.parquet`, `instances.parquet` |
-| 3 | `python -m src.features` *(later)* | `instances.parquet` | `features.parquet` |
-| 4 | notebooks `01`→`04` *(later)* | `features.parquet` | figures + `reports/results.md` |
+| 2–3 | `python -m src.clean` | `blitz_sample.parquet` | `games_clean.parquet`, `instances.parquet` |
+| 4 | `python -m src.features` *(later)* | `instances.parquet` + `games_clean.parquet` | `features.parquet` |
+| 5 | notebooks `01`→`04` *(later)* | `features.parquet` | figures + `reports/results.md` |
 
 **Sanity gate:** run `pytest` before every push (math regression + the fixture smoke test).
 
@@ -91,9 +91,30 @@ interface Person A (ingest) hands to B/C (features/model).
 | `movetext` | string | `StringExporter` | raw SAN + `[%eval]`/`[%clk]`; re-parsed by `features.py` |
 | `n_plies` | int16 | computed | half-move count (post `min_plies` filter) |
 
-**No opponent-derived columns.** Instance-explode (2 rows/game, one per side, labelled with *that*
-player's rating, opponent rating **dropped**) is Stage 3 — `white_elo`/`black_elo` are the raw
-material for it, not model features.
+`white_elo`/`black_elo` are the raw material for the per-player labels below — not model features.
+
+## Parquet schema contract — `instances.parquet`
+
+Stage 2–3 (`src/clean.py`) dedups games, drops unusable labels, and **explodes each game into two
+rows, one per player** (defined once as `src.clean.INSTANCE_COLUMNS`). Each row describes only that
+player and is labelled with that player's rating. `games_clean.parquet` keeps the full per-game rows
+(same schema as `blitz_sample`) so the feature stage can fetch `movetext` by `game_id`.
+
+| column | dtype | note |
+|---|---|---|
+| `game_id` | string | joins back to `games_clean` for the `movetext` |
+| `color` | string | `white` / `black` |
+| `username` | string | this player — the **grouped-split key** (never split by game) |
+| `rating` | int16 | this player's Elo — the regression **label** |
+| `result` | string | `win` / `loss` / `draw`, from this player's point of view |
+| `time_control`, `eco`, `opening`, `n_plies` | string / int16 | game-level context shared by both sides |
+
+**Leakage guard (enforced in code):** an instance row **never** carries the opponent's rating or
+username. Lichess matches similar ratings, so any opponent-derived signal leaks the label. Always
+split train/test by `username` (GroupKFold / grouped hold-out), never by game.
+
+> **Provisional ratings** stay unfiltered here — the status isn't in exported PGN, so `config.yaml`'s
+> `drop_provisional` is a documented no-op (see Limitations).
 
 ---
 
