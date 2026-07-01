@@ -1,0 +1,8 @@
+# Normalize line endings across the team (some on Windows, some not) so diffs stay clean.
+* text=auto eol=lf
+
+# Binary artifacts git must never try to normalize.
+*.zst binary
+*.parquet binary
+*.png binary
+*.pkl binary

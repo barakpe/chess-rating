@@ -1,0 +1,33 @@
+# --- Data & model artifacts: NEVER committed (see README) ---
+data/
+models/
+*.pgn
+*.pgn.zst
+*.zst
+*.parquet
+
+# --- Python ---
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+.env
+.pytest_cache/
+.ipynb_checkpoints/
+
+# --- OS / editor ---
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+
+# --- Reports: allow small result PNGs, ignore heavy ones by convention ---
+!reports/figures/*.png
+
+# --- Committed test fixture: a tiny synthetic dump so the ingest smoke test
+#     is reproducible WITHOUT the 30 GB monthly download. These exceptions must
+#     come AFTER the *.pgn / *.zst ignores above to take effect. ---
+!tests/fixtures/
+!tests/fixtures/*.pgn
+!tests/fixtures/*.pgn.zst

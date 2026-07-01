@@ -1,0 +1,48 @@
+# Chess Rating Estimation — single source of truth for every knob.
+# Every script reads this file (via src/config.py). No magic numbers in code.
+
+# --- Data selection ---
+month: "2025-05"                 # a recent COMPLETE month; must exist on https://database.lichess.org/
+time_control: "blitz"            # human label; the real filter is blitz_estimate_seconds below
+blitz_estimate_seconds: [180, 479]   # keep if (base + 40*inc) is in this inclusive range
+                                     # (scalachess Speed ranges: Blitz = 180..479s)
+use_stored_evals: true           # Option A — only keep games that already carry [%eval]
+
+# --- Sampling ---
+sample_size: 300000              # bump up on a stronger machine
+max_games_scanned: null          # cap the raw stream for fast prototyping (null = whole file)
+random_seed: 42                  # fix everywhere for reproducibility
+
+# --- Cleaning / filtering ---
+min_plies: 10                    # drop aborted / ultra-short games
+drop_provisional: true           # NOTE: NOT implementable from the dump — provisional status is
+                                 # stripped from exported PGN. Kept as a documented no-op so the
+                                 # intent is recorded; see README "Limitations". Do not rely on it.
+exclude_bots: true               # drop games with WhiteTitle/BlackTitle == "BOT"
+keep_terminations: ["Normal", "Time forfeit"]
+                                 # allowlist: only the two Termination strings confirmed from official
+                                 # Lichess samples. "Abandoned" / "Rules infraction" are dropped by
+                                 # exclusion. TODO: verify exact spellings against a real dump.
+
+# --- Labels / evaluation buckets ---
+rating_bands: [0, 1200, 1400, 1600, 1800, 2000, 3000]   # for the derived-band confusion matrix
+
+# --- Eval handling (Win% / centipawn math) ---
+eval:
+  cp_clamp: 1000                 # clamp centipawns to +/- this before Win% (matches Lichess)
+  mate_score: 100000             # fold mate into a large cp value for raw features
+  start_cp: 15                   # Cp.initial: assumed eval of the start position (first "before")
+
+# --- Game-phase boundaries (pragmatic; tune later) ---
+phases:
+  opening_max_ply: 30            # ~15 full moves; opening lasts until out of book or this ply
+  endgame_nonpawn_pieces: 6      # middlegame -> endgame when total non-pawn pieces (both sides) <= this
+
+# --- Paths ---
+paths:
+  raw: data/raw
+  processed: data/processed
+  figures: reports/figures
+
+outputs:
+  blitz_sample: data/processed/blitz_sample.parquet
