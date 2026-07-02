@@ -52,7 +52,8 @@ parallel against the interface (not by reading each other's code).
 | 1 | `python -m src.ingest` | `data/raw/lichess_db_standard_rated_<month>.pgn.zst` | `data/processed/blitz_sample.parquet` |
 | 2–3 | `python -m src.clean` | `blitz_sample.parquet` | `games_clean.parquet`, `instances.parquet` |
 | 4 | `python -m src.features` | `games_clean.parquet` + `instances.parquet` | `features.parquet` |
-| 5 | notebooks `01`→`04` *(later)* | `features.parquet` | figures + `reports/results.md` |
+| 5 | `python -m src.model` | `features.parquet` + `games_clean.parquet` | baseline MAE/RMSE → `reports/results.md` |
+| 6 | notebooks `01`→`04` *(later)* | `features.parquet` | figures + `reports/results.md` |
 
 **Sanity gate:** run `pytest` before every push (math regression + the fixture smoke test).
 

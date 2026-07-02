@@ -49,6 +49,15 @@ features:
   time_trouble_seconds: 15       # remaining clock below this counts as time trouble
   winning_winpct: 80             # Win% at/above which a position is "winning" (conversion feature)
 
+# --- Modeling (Stage 5 baseline) ---
+model:
+  test_size: 0.2                 # grouped hold-out fraction (split by username, never by game)
+  ridge_alpha: 10.0
+  lgbm:
+    n_estimators: 400
+    learning_rate: 0.05
+    num_leaves: 31
+
 # --- Paths ---
 paths:
   raw: data/raw
