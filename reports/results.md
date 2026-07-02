@@ -30,3 +30,17 @@ n_train=37802, n_test=11753, n_features=65
 - band accuracy: 35.5% exact, 75.3% adjacent
 - aggregation MAE: K1=237, K2=215, K3=222, K5=222, K10=224
 - ablation (MAE↑ when dropped): engine +31.4, style +10.9, clock +8.1, opening +7.6
+
+## 2026-07-03 00:58 — improved model (tuned)
+n_train=37802, n_test=11753, n_features=65
+
+| stage | MAE | RMSE |
+|---|---|---|
+| no-engine baseline | 287.8 | — |
+| + engine/clock | 241.2 | 304.2 |
+| + tuned | 239.5 | 301.5 |
+
+- 90% interval coverage: **83.9%** (width 913 Elo)
+- band accuracy: 35.4% exact, 75.6% adjacent
+- aggregation MAE: K1=236, K2=213, K3=221, K5=220, K10=222
+- ablation (MAE↑ when dropped): engine +31.4, style +10.9, clock +8.1, opening +7.6

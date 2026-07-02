@@ -186,4 +186,10 @@ must run top-to-bottom (Restart & Run All) before they're considered done.
   drop provisional-rated (noisier) labels from the dump. Recorded so the intent is explicit.
 - **Single-game noise floor:** one blitz game can't pin a rating; precision comes from aggregating
   across a player's games. This is a finding, not a bug.
+- **Aggregation-curve cohort:** a uniform *game* sample has few players with many games, so each K in
+  the aggregation curve is a different, shrinking cohort (higher-K points are noisier and not
+  apples-to-apples). Backlog: a player-stratified sample (pick players, take all their games) would
+  give a cleaner, monotone curve.
+- **Interval calibration:** the raw 90% quantile interval under-covers (~85% empirically); backlog is
+  conformalized quantile regression (CQR) to recalibrate width for guaranteed marginal coverage.
 - **Scope:** blitz only; results may not transfer to rapid/classical.
