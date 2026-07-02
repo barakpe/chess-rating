@@ -182,6 +182,139 @@ def _append_results_md(path: str | Path, results: dict[str, dict[str, float]]) -
         fh.write("\n".join(lines) + "\n")
 
 
+# =======================================================================================
+# Stage 6 — Improved model: full (engine + clock) features, early stopping, tuning, intervals
+# =======================================================================================
+
+# Columns that are identifiers/labels/leaks, never fed to the model.
+_NON_FEATURE = {"game_id", "username", "opponent_rating", "rating", "opening"}
+# Categorical features (low/medium cardinality); everything else numeric is used as-is.
+FULL_CAT = ["result", "time_control", "eco", "color"]
+
+
+def split_feature_columns(df: pd.DataFrame) -> tuple[list[str], list[str]]:
+    """Return (numeric_features, categorical_features) for the full (engine+clock) model."""
+    cat = [c for c in FULL_CAT if c in df.columns]
+    num = [
+        c for c in df.columns
+        if c not in _NON_FEATURE and c not in cat and pd.api.types.is_numeric_dtype(df[c])
+    ]
+    return num, cat
+
+
+def prepare_features(df: pd.DataFrame, cat_cols: list[str]) -> pd.DataFrame:
+    """Fix categorical dtypes so LightGBM's category codes are stable across splits."""
+    df = df.copy()
+    for col in cat_cols:
+        df[col] = df[col].astype("category")
+    return df
+
+
+def grouped_train_val_test(
+    df: pd.DataFrame, cfg: dict[str, Any]
+) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
+    """Grouped (by username) train/val/test — val is carved from train for early stopping."""
+    seed = cfg["random_seed"]
+    train_full, test = grouped_split(df, cfg["model"]["test_size"], seed)
+    train, val = grouped_split(train_full, cfg["model"]["val_size"], seed + 1)
+    return train, val, test
+
+
+def make_point_model(cfg: dict[str, Any], params: dict[str, Any] | None = None):
+    import lightgbm as lgb
+
+    lp = cfg["model"]["lgbm"]
+    kwargs = {
+        "objective": "regression_l1", "n_estimators": lp["n_estimators"],
+        "learning_rate": lp["learning_rate"], "num_leaves": lp["num_leaves"],
+        "random_state": cfg["random_seed"], "n_jobs": -1, "verbose": -1,
+    }
+    if params:
+        kwargs.update(params)
+    return lgb.LGBMRegressor(**kwargs)
+
+
+def make_quantile_model(cfg: dict[str, Any], alpha: float, params: dict[str, Any] | None = None):
+    import lightgbm as lgb
+
+    lp = cfg["model"]["lgbm"]
+    kwargs = {
+        "objective": "quantile", "alpha": alpha, "n_estimators": lp["n_estimators"],
+        "learning_rate": lp["learning_rate"], "num_leaves": lp["num_leaves"],
+        "random_state": cfg["random_seed"], "n_jobs": -1, "verbose": -1,
+    }
+    if params:
+        kwargs.update(params)
+    kwargs["objective"], kwargs["alpha"] = "quantile", alpha  # never let params override these
+    return lgb.LGBMRegressor(**kwargs)
+
+
+def fit_early_stopping(model, x_tr, y_tr, x_val, y_val, cfg, eval_metric="l1"):
+    import lightgbm as lgb
+
+    model.fit(
+        x_tr, y_tr, eval_set=[(x_val, y_val)], eval_metric=eval_metric,
+        callbacks=[lgb.early_stopping(cfg["model"]["early_stopping_rounds"], verbose=False),
+                   lgb.log_evaluation(0)],
+    )
+    return model
+
+
+def train_quantile_models(x_tr, y_tr, x_val, y_val, cfg, params=None) -> dict[float, Any]:
+    """One LightGBM per quantile (alpha) — you cannot get multiple quantiles from one model."""
+    models = {}
+    for alpha in cfg["model"]["quantiles"]:
+        model = make_quantile_model(cfg, alpha, params)
+        fit_early_stopping(model, x_tr, y_tr, x_val, y_val, cfg, eval_metric="quantile")
+        models[alpha] = model
+    return models
+
+
+def predict_interval(models: dict[float, Any], x, quantiles: list[float]) -> dict[str, np.ndarray]:
+    """Predict each quantile then de-cross by sorting the per-row predictions ascending."""
+    preds = np.column_stack([models[a].predict(x) for a in quantiles])
+    preds = np.sort(preds, axis=1)  # guarantees lower <= median <= upper
+    return {"lower": preds[:, 0], "median": preds[:, len(quantiles) // 2], "upper": preds[:, -1]}
+
+
+def tune_lgbm(x, y, groups, cfg) -> dict[str, Any]:
+    """Optuna TPE search minimising grouped-CV MAE. Returns the best hyperparameters."""
+    import lightgbm as lgb
+    import optuna
+    from sklearn.model_selection import GroupKFold
+
+    optuna.logging.set_verbosity(optuna.logging.WARNING)
+    y = np.asarray(y, float)
+
+    def objective(trial):
+        params = {
+            "num_leaves": trial.suggest_int("num_leaves", 15, 255),
+            "learning_rate": trial.suggest_float("learning_rate", 0.01, 0.1, log=True),
+            "feature_fraction": trial.suggest_float("feature_fraction", 0.5, 1.0),
+            "bagging_fraction": trial.suggest_float("bagging_fraction", 0.5, 1.0),
+            "bagging_freq": trial.suggest_int("bagging_freq", 1, 7),
+            "min_child_samples": trial.suggest_int("min_child_samples", 5, 120),
+            "reg_lambda": trial.suggest_float("reg_lambda", 1e-3, 10.0, log=True),
+        }
+        gkf = GroupKFold(n_splits=3)
+        scores = []
+        for tr, va in gkf.split(x, y, groups):
+            model = make_point_model(cfg, params)
+            model.fit(
+                x.iloc[tr], y[tr], eval_set=[(x.iloc[va], y[va])], eval_metric="l1",
+                callbacks=[lgb.early_stopping(cfg["model"]["early_stopping_rounds"], verbose=False),
+                           lgb.log_evaluation(0)],
+            )
+            scores.append(mae(y[va], model.predict(x.iloc[va])))
+        return float(np.mean(scores))
+
+    study = optuna.create_study(
+        direction="minimize", sampler=optuna.samplers.TPESampler(seed=cfg["random_seed"])
+    )
+    study.optimize(objective, n_trials=cfg["model"]["tune"]["n_trials"], show_progress_bar=False)
+    return study.best_params
+
+
 def main() -> None:
     from src.config import load_config
 

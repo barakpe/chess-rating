@@ -31,8 +31,12 @@ Python 3.10+. Stockfish is **not** needed (Option A reads evals already in the P
 | `config.yaml` | **Single source of truth** for every knob (month, sample size, thresholds, seed). No magic numbers in code. |
 | `src/config.py` | Loads + validates `config.yaml`, resolves/creates paths. |
 | `src/ingest.py` | Stage 1: stream the `.pgn.zst`, filter to blitz + has-eval, reservoir-sample, write parquet. |
-| `src/features.py` | Verified Win%/Accuracy%/move-classification math + phase-split feature extraction (stub). |
-| `tests/` | `test_features.py` (math), `test_ingest.py` (fixture smoke test), `fixtures/` (tiny synthetic dump). |
+| `src/clean.py` | Stages 2–3: dedup/clean + explode into per-player instances (opponent dropped). |
+| `src/features.py` | Verified Win%/Accuracy%/classification math + Stage 4 phase-split feature extraction. |
+| `src/model.py` | Stages 5–6: baselines (mean, copy-opponent) + ridge/LightGBM, early stopping, Optuna, quantile intervals. |
+| `src/evaluate.py` | Stages 7–8: grouped metrics, coverage/pinball, bands + confusion, aggregation curve, calibration, SHAP, error analysis, ablations. |
+| `src/plotting.py` | Shared matplotlib style + `save_fig` (every deck figure → `reports/figures/`). |
+| `tests/` | Unit tests per stage + `fixtures/` (tiny synthetic dump for the ingest smoke test). |
 | `data/` | **Gitignored, never committed.** `raw/` = downloaded dumps, `processed/` = parquet outputs. |
 | `notebooks/` | Exploration only; numbered, run top-to-bottom. Added in their phases. |
 | `reports/figures/` | Saved PNGs the slides pull from. |
@@ -53,7 +57,16 @@ parallel against the interface (not by reading each other's code).
 | 2–3 | `python -m src.clean` | `blitz_sample.parquet` | `games_clean.parquet`, `instances.parquet` |
 | 4 | `python -m src.features` | `games_clean.parquet` + `instances.parquet` | `features.parquet` |
 | 5 | `python -m src.model` | `features.parquet` + `games_clean.parquet` | baseline MAE/RMSE → `reports/results.md` |
-| 6 | notebooks `01`→`04` *(later)* | `features.parquet` | figures + `reports/results.md` |
+| 6 | `python -m src.evaluate` `[--tune]` | `features.parquet` + `games_clean.parquet` | improved model + eval + error analysis → figures + `reports/results.md` |
+| 7 | notebooks `01`→`04` *(later)* | `features.parquet` | figures + `reports/results.md` |
+
+**Stage 6 (`src/evaluate.py`)** trains the improved model on the full engine+clock features and reports
+the improvement table (no-engine baseline → +engine → tuned), the **90% prediction interval** from
+three quantile LightGBMs (empirical coverage + pinball loss), rating-band accuracy + confusion matrix,
+the **aggregation curve** (MAE vs games-per-player — single-game noise vs precision by averaging),
+calibration, and **SHAP** importances. Stage 8 adds error analysis (largest residuals, residual by band
+& game length) and **feature-group ablations**. Everything is split by `username` (never by game).
+Figures are written to `reports/figures/`. Add `--tune` for Optuna hyperparameter search.
 
 **Sanity gate:** run `pytest` before every push (math regression + the fixture smoke test).
 
