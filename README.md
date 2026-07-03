@@ -186,6 +186,13 @@ must run top-to-bottom (Restart & Run All) before they're considered done.
   drop provisional-rated (noisier) labels from the dump. Recorded so the intent is explicit.
 - **Single-game noise floor:** one blitz game can't pin a rating; precision comes from aggregating
   across a player's games. This is a finding, not a bug.
+- **Tail error is (mostly) irreducible single-game noise, not fixable bias.** Error concentrates at
+  the rating extremes (0–1200 MAE 347, over-predicting; 2000+ MAE 280, under-predicting) vs ~180 in
+  the middle. We tested corrections (`python -m src.evaluate --tail-study`): post-hoc de-shrink fits a
+  slope of **≈1.01** — i.e. the model is **already calibrated** (E[true|pred] ≈ pred) — and band
+  reweighting only *redistributes* error across bands (overall MAE flat-to-worse). So the tail
+  shrinkage is the statistically optimal response to weak single-game evidence, not a bug. The real
+  levers are **aggregation** (more games per player) and **better tail-discriminating features**.
 - **Aggregation-curve cohort:** a uniform *game* sample has few players with many games, so each K in
   the aggregation curve is a different, shrinking cohort (higher-K points are noisier and not
   apples-to-apples). Backlog: a player-stratified sample (pick players, take all their games) would

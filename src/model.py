@@ -249,15 +249,30 @@ def make_quantile_model(cfg: dict[str, Any], alpha: float, params: dict[str, Any
     return lgb.LGBMRegressor(**kwargs)
 
 
-def fit_early_stopping(model, x_tr, y_tr, x_val, y_val, cfg, eval_metric="l1"):
+def fit_early_stopping(model, x_tr, y_tr, x_val, y_val, cfg, eval_metric="l1", sample_weight=None):
     import lightgbm as lgb
 
     model.fit(
-        x_tr, y_tr, eval_set=[(x_val, y_val)], eval_metric=eval_metric,
+        x_tr, y_tr, sample_weight=sample_weight, eval_set=[(x_val, y_val)], eval_metric=eval_metric,
         callbacks=[lgb.early_stopping(cfg["model"]["early_stopping_rounds"], verbose=False),
                    lgb.log_evaluation(0)],
     )
     return model
+
+
+def band_sample_weights(ratings: np.ndarray, bands: list[int], strength: float = 1.0) -> np.ndarray:
+    """Per-instance training weights that up-weight rare rating bands (mean-normalised to 1).
+
+    The natural rating distribution is bell-shaped, so an MAE learner shrinks the tails toward the
+    centre. Weighting each instance by ``(1 / band_frequency) ** strength`` makes the model value
+    the tails more, trading a little central accuracy for less tail bias. ``strength=0`` -> uniform.
+    """
+    idx = np.digitize(np.asarray(ratings, float), bands[1:-1])
+    counts = np.bincount(idx, minlength=len(bands) - 1).astype(float)
+    counts[counts == 0] = 1.0
+    freq = counts[idx] / counts.sum()
+    weights = (1.0 / freq) ** strength
+    return weights / weights.mean()
 
 
 def train_quantile_models(x_tr, y_tr, x_val, y_val, cfg, params=None) -> dict[float, Any]:

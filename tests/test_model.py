@@ -13,6 +13,7 @@ import pandas as pd  # noqa: E402
 from src.config import load_config  # noqa: E402
 from src.model import (  # noqa: E402
     add_opponent_rating,
+    band_sample_weights,
     evaluate,
     grouped_split,
     mae,
@@ -44,6 +45,14 @@ def test_add_opponent_rating():
     assert out.loc[out.color == "white", "opponent_rating"].iloc[0] == 1500
     assert out.loc[out.color == "black", "opponent_rating"].iloc[0] == 1600
     assert "white_elo" not in out.columns and "black_elo" not in out.columns
+
+
+def test_band_sample_weights_upweights_tails():
+    bands = [0, 1200, 1400, 1600, 1800, 2000, 3000]
+    ratings = np.array([1500] * 8 + [500, 2500])  # 8 mid, 1 low tail, 1 high tail
+    w = band_sample_weights(ratings, bands, strength=1.0)
+    assert w.mean() == pytest.approx(1.0)          # mean-normalised
+    assert w[-1] > w[0] and w[-2] > w[0]           # rare tail bands weigh more than the common one
 
 
 def _synthetic(n_players=24, per_player=4, seed=0):

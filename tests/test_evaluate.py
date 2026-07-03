@@ -13,8 +13,10 @@ import pandas as pd  # noqa: E402
 from src.config import load_config  # noqa: E402
 from src.evaluate import (  # noqa: E402
     aggregation_curve,
+    apply_deshrink,
     band_accuracy,
     feature_groups,
+    fit_deshrink,
     interval_coverage,
     mean_interval_width,
     per_player_metrics,
@@ -71,6 +73,15 @@ def test_per_player_metrics():
     assert m["n_players"] == 2
     assert m["mae"] == pytest.approx(50.0)
     assert m["multi_game_share"] == pytest.approx(0.5)
+
+
+def test_deshrink_recovers_shrunk_predictions():
+    rng = np.random.RandomState(0)
+    true = rng.uniform(800, 2400, 500)
+    pred = 1500 + 0.5 * (true - 1500)       # shrunk 50% toward the centre
+    coef = fit_deshrink(pred, true)
+    assert coef[0] == pytest.approx(2.0, rel=1e-6)   # slope true~pred = 1/0.5
+    assert np.allclose(apply_deshrink(pred, coef), true, atol=1e-6)
 
 
 def test_feature_groups_partition():

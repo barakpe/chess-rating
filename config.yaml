@@ -56,6 +56,7 @@ model:
   ridge_alpha: 10.0
   early_stopping_rounds: 50
   quantiles: [0.05, 0.5, 0.95]   # lower / median / upper -> a 90% prediction interval
+  balance_strength: 0.5          # tail reweighting exponent (0=uniform, 1=full inverse-frequency)
   lgbm:
     n_estimators: 3000           # upper bound; early stopping picks the real count
     learning_rate: 0.03
