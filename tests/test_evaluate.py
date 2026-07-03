@@ -17,7 +17,9 @@ from src.evaluate import (  # noqa: E402
     feature_groups,
     interval_coverage,
     mean_interval_width,
+    per_player_metrics,
     pinball_loss,
+    point_metrics,
     run_evaluation,
     to_bands,
 )
@@ -47,6 +49,28 @@ def test_bands_and_accuracy():
     exact, adjacent = band_accuracy(y, yhat, bands)
     assert exact == pytest.approx(1 / 3)
     assert adjacent == pytest.approx(2 / 3)
+
+
+def test_point_metrics():
+    m = point_metrics([1000, 2000], [1100, 1800])  # resid = [+100, -200]
+    assert m["mae"] == pytest.approx(150.0)
+    assert m["median_ae"] == pytest.approx(150.0)
+    assert m["r2"] == pytest.approx(0.9)
+    assert m["bias"] == pytest.approx(-50.0)          # net under-prediction
+    assert m["within_100"] == pytest.approx(0.5) and m["within_200"] == pytest.approx(1.0)
+    assert m["pearson"] == pytest.approx(1.0) and m["spearman"] == pytest.approx(1.0)
+
+
+def test_per_player_metrics():
+    df = pd.DataFrame({
+        "username": ["a", "a", "b"],
+        "rating": [1500.0, 1500.0, 1800.0],
+        "pred": [1500.0, 1500.0, 1700.0],
+    })
+    m = per_player_metrics(df)                        # a: err 0 (2 games), b: err 100 (1 game)
+    assert m["n_players"] == 2
+    assert m["mae"] == pytest.approx(50.0)
+    assert m["multi_game_share"] == pytest.approx(0.5)
 
 
 def test_feature_groups_partition():

@@ -74,6 +74,43 @@ def band_accuracy(y_true: np.ndarray, y_pred: np.ndarray, bands: list[int]) -> t
     return float(np.mean(diff == 0)), float(np.mean(diff <= 1))
 
 
+def _rank(a: np.ndarray) -> np.ndarray:
+    order = np.argsort(np.argsort(np.asarray(a, float)))
+    return order.astype(float)
+
+
+def point_metrics(y: np.ndarray, yhat: np.ndarray) -> dict[str, float]:
+    """A fuller picture than MAE alone: error spread, variance explained, rank, tail bias."""
+    y, yhat = np.asarray(y, float), np.asarray(yhat, float)
+    resid = yhat - y                                   # + = over-predicted
+    ss_res = float(np.sum(resid ** 2))
+    ss_tot = float(np.sum((y - y.mean()) ** 2))
+    return {
+        "mae": float(np.mean(np.abs(resid))),
+        "rmse": float(np.sqrt(np.mean(resid ** 2))),
+        "median_ae": float(np.median(np.abs(resid))),
+        "r2": 1.0 - ss_res / ss_tot if ss_tot else float("nan"),
+        "pearson": float(np.corrcoef(yhat, y)[0, 1]),
+        "spearman": float(np.corrcoef(_rank(yhat), _rank(y))[0, 1]),
+        "within_100": float(np.mean(np.abs(resid) <= 100)),
+        "within_200": float(np.mean(np.abs(resid) <= 200)),
+        "bias": float(np.mean(resid)),                 # global over/under-prediction
+    }
+
+
+def per_player_metrics(test_df: pd.DataFrame) -> dict[str, float]:
+    """Aggregate ALL of each player's test games (mean prediction) — the useful, denoised output."""
+    agg = test_df.groupby("username").agg(
+        pred=("pred", "mean"), rating=("rating", "mean"), n=("rating", "size"),
+    )
+    return {
+        "n_players": int(len(agg)),
+        "mae": float(np.mean(np.abs(agg["pred"] - agg["rating"]))),
+        "mean_games_per_player": float(agg["n"].mean()),
+        "multi_game_share": float(np.mean(agg["n"] >= 2)),
+    }
+
+
 def aggregation_curve(
     test_df: pd.DataFrame, ks: list[int], min_players: int, seed: int
 ) -> list[dict[str, float]]:
@@ -264,16 +301,18 @@ def run_evaluation(
     results["pinball"] = {a: pinball_loss(y_te, qmodels[a].predict(test[full_features]), a)
                           for a in cfg["model"]["quantiles"]}
 
-    # --- band accuracy + confusion ---
+    # --- fuller point metrics + band accuracy + confusion ---
     bands = cfg["rating_bands"]
+    results["point"] = point_metrics(y_te, best_pred)
     results["band_exact"], results["band_adjacent"] = band_accuracy(y_te, best_pred, bands)
 
-    # --- aggregation curve ---
+    # --- aggregation curve + per-player (all games averaged) ---
     test = test.copy()
     test["pred"] = best_pred
     curve = aggregation_curve(test, cfg["evaluate"]["aggregation_k"],
                               cfg["evaluate"]["aggregation_min_players"], cfg["random_seed"])
     results["aggregation_curve"] = curve
+    results["per_player"] = per_player_metrics(test)
 
     # --- Stage 8 error analysis ---
     resid = best_pred - y_te
@@ -346,11 +385,20 @@ def _print_summary(r: dict[str, Any]) -> None:
     print(f"  + engine/clock features  : {r['full_mae']:.1f}  (RMSE {r['full_rmse']:.1f})")
     if "tuned_mae" in r:
         print(f"  + Optuna tuning          : {r['tuned_mae']:.1f}  (RMSE {r['tuned_rmse']:.1f})")
+    p = r["point"]
+    print(f"  median AE / R2 / rho     : {p['median_ae']:.0f} / {p['r2']:.3f} / {p['spearman']:.3f}")
+    print(f"  within 100 / 200 Elo     : {p['within_100']*100:.1f}% / {p['within_200']*100:.1f}%   (bias {p['bias']:+.1f})")
+    pp = r["per_player"]
+    print(f"  per-player (all games)   : {pp['mae']:.1f} MAE over {pp['n_players']:,} players "
+          f"({pp['multi_game_share']*100:.0f}% have >=2 games)")
     print(f"  90% interval coverage    : {r['coverage']*100:.1f}%  (target 90)  width {r['mean_interval_width']:.0f}")
     print(f"  band exact / adjacent    : {r['band_exact']*100:.1f}% / {r['band_adjacent']*100:.1f}%")
     if r["aggregation_curve"]:
         c = r["aggregation_curve"]
         print(f"  aggregation MAE K={c[0]['k']}->{c[-1]['k']}: {c[0]['mae']:.1f} -> {c[-1]['mae']:.1f}")
+    print("  residual by band (mean resid = regression to the mean):")
+    for rb in r["residual_by_band"]:
+        print(f"    {rb['band']:<10} n={rb['n']:>5}  mean_resid {rb['mean_residual']:+7.1f}  MAE {rb['mae']:.0f}")
     print("  ablations (MAE increase when the group is dropped):")
     for a in r["ablations"]:
         print(f"    -{a['group']:<8} (+{a['mae_increase']:.1f})")
@@ -370,8 +418,12 @@ def _append_results_md(path: str | Path, r: dict[str, Any], tuned: bool) -> None
     ]
     if "tuned_mae" in r:
         lines.append(f"| + tuned | {r['tuned_mae']:.1f} | {r['tuned_rmse']:.1f} |")
+    p, pp = r["point"], r["per_player"]
     lines += [
         "",
+        f"- median AE {p['median_ae']:.0f}, R² {p['r2']:.3f}, Spearman {p['spearman']:.3f}, "
+        f"within 100/200 Elo {p['within_100']*100:.0f}%/{p['within_200']*100:.0f}%, bias {p['bias']:+.1f}",
+        f"- per-player (all games averaged): **{pp['mae']:.1f}** MAE over {pp['n_players']} players",
         f"- 90% interval coverage: **{r['coverage']*100:.1f}%** (width {r['mean_interval_width']:.0f} Elo)",
         f"- band accuracy: {r['band_exact']*100:.1f}% exact, {r['band_adjacent']*100:.1f}% adjacent",
     ]
