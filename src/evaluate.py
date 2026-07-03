@@ -31,6 +31,7 @@ import pandas as pd
 from src.model import (
     BASELINE_FEATURES,
     add_opponent_rating,
+    band_sample_weights,
     fit_early_stopping,
     grouped_train_val_test,
     make_point_model,
@@ -96,6 +97,83 @@ def point_metrics(y: np.ndarray, yhat: np.ndarray) -> dict[str, float]:
         "within_200": float(np.mean(np.abs(resid) <= 200)),
         "bias": float(np.mean(resid)),                 # global over/under-prediction
     }
+
+
+def fit_deshrink(pred_val: np.ndarray, y_val: np.ndarray) -> tuple[float, float]:
+    """Fit a linear de-shrink map (slope, intercept) of true~pred on validation.
+
+    A shrunk predictor has slope(true~pred) > 1, so applying it expands predictions away from the
+    centre — removing the systematic tail bias, at the cost of extra variance on noisy signal.
+    """
+    slope, intercept = np.polyfit(np.asarray(pred_val, float), np.asarray(y_val, float), 1)
+    return float(slope), float(intercept)
+
+
+def apply_deshrink(pred: np.ndarray, coef: tuple[float, float]) -> np.ndarray:
+    slope, intercept = coef
+    return slope * np.asarray(pred, float) + intercept
+
+
+def _band_mae_table(y_true: np.ndarray, y_pred: np.ndarray, bands: list[int]) -> dict[str, float]:
+    """MAE per band + overall + a tail-vs-mid summary, for comparing tail corrections."""
+    bt = to_bands(y_true, bands)
+    out = {"overall": float(np.mean(np.abs(y_pred - y_true)))}
+    maes = []
+    for b in range(len(bands) - 1):
+        m = bt == b
+        val = float(np.mean(np.abs(y_pred[m] - y_true[m]))) if m.any() else float("nan")
+        out[f"{bands[b]}-{bands[b+1]}"] = val
+        maes.append(val)
+    out["tail"] = float(np.nanmean([maes[0], maes[-1]]))      # lowest + highest band
+    out["mid"] = float(np.nanmean(maes[1:-1]))
+    return out
+
+
+def run_tail_study(cfg: dict[str, Any], features_path, games_path) -> dict[str, dict[str, float]]:
+    """Compare the point model plain vs band-reweighted vs post-hoc de-shrink, per rating band.
+
+    Answers "how much of the tail regression-to-the-mean can we remove, and at what cost?"
+    """
+    features = pd.read_parquet(features_path)
+    games = pd.read_parquet(games_path)
+    df = add_opponent_rating(features, games)
+    num, cat = split_feature_columns(df)
+    full = num + cat
+    df = prepare_features(df, cat)
+    train, val, test = grouped_train_val_test(df, cfg)
+    y_tr, y_val, y_te = (s["rating"].to_numpy(float) for s in (train, val, test))
+    bands = cfg["rating_bands"]
+
+    plain = make_point_model(cfg)
+    fit_early_stopping(plain, train[full], y_tr, val[full], y_val, cfg)
+    pred_plain = plain.predict(test[full])
+
+    weights = band_sample_weights(y_tr, bands, cfg["model"]["balance_strength"])
+    weighted = make_point_model(cfg)
+    fit_early_stopping(weighted, train[full], y_tr, val[full], y_val, cfg, sample_weight=weights)
+    pred_weighted = weighted.predict(test[full])
+
+    coef = fit_deshrink(plain.predict(val[full]), y_val)
+    pred_deshrink = apply_deshrink(pred_plain, coef)
+
+    variants = {
+        "plain": _band_mae_table(y_te, pred_plain, bands),
+        f"reweighted(s={cfg['model']['balance_strength']})": _band_mae_table(y_te, pred_weighted, bands),
+        f"deshrink(slope={coef[0]:.2f})": _band_mae_table(y_te, pred_deshrink, bands),
+    }
+    _print_tail_study(variants, bands)
+    return variants
+
+
+def _print_tail_study(variants: dict[str, dict[str, float]], bands: list[int]) -> None:
+    band_cols = [f"{bands[b]}-{bands[b+1]}" for b in range(len(bands) - 1)]
+    print("\nTail-correction study (MAE by rating band):")
+    header = f"  {'variant':<24}{'overall':>8}{'tail':>7}{'mid':>7}   " + "".join(f"{c:>11}" for c in band_cols)
+    print(header)
+    for name, tbl in variants.items():
+        row = f"  {name:<24}{tbl['overall']:>8.1f}{tbl['tail']:>7.0f}{tbl['mid']:>7.0f}   "
+        row += "".join(f"{tbl[c]:>11.0f}" for c in band_cols)
+        print(row)
 
 
 def per_player_metrics(test_df: pd.DataFrame) -> dict[str, float]:
@@ -446,12 +524,17 @@ def main() -> None:
     parser.add_argument("--games", default=cfg["outputs"]["games_clean"])
     parser.add_argument("--tune", action="store_true", help="run Optuna hyperparameter search")
     parser.add_argument("--no-figures", action="store_true", help="skip figure generation")
+    parser.add_argument("--tail-study", action="store_true",
+                        help="only compare tail-bias corrections (plain vs reweighted vs de-shrink)")
     parser.add_argument("--results-md", default=str(Path(cfg["paths"]["figures"]).parent / "results.md"))
     args = parser.parse_args()
 
     for label, path in (("features", args.features), ("games_clean", args.games)):
         if not Path(path).exists():
             raise SystemExit(f"{label} not found: {path}\nRun the earlier stages first.")
+    if args.tail_study:
+        run_tail_study(cfg, args.features, args.games)
+        return
     run_evaluation(cfg, args.features, args.games, tune=args.tune,
                    make_figures=not args.no_figures, results_md=(args.results_md or None))
 
