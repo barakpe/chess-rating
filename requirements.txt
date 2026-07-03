@@ -14,6 +14,7 @@ pyarrow==17.0.0          # parquet I/O
 scikit-learn==1.5.2
 lightgbm==4.5.0          # baseline + quantile regression (objective="quantile")
 shap==0.46.0             # feature attribution on the tuned model
+optuna==4.0.0            # LightGBM hyperparameter search (src.evaluate --tune)
 
 # --- Plotting ---
 matplotlib==3.9.2
@@ -27,7 +28,6 @@ tqdm==4.67.1             # progress bars during the long ingest scan
 pytest==8.3.3            # math regression tests + fixture smoke test
 
 # --- Optional (uncomment when the relevant stage lands) ---
-# optuna==4.0.0          # LightGBM hyperparameter tuning (Stage 6)
 # mapie==0.9.1           # conformal prediction intervals (alternative to raw quantile)
 # crepes==0.7.1          # conformal predictive systems (alternative)
 # torch==2.4.1           # neural sequence model (stretch goal)

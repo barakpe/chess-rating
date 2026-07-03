@@ -7,9 +7,9 @@ This module has two parts:
    Lichess source (``lila``/``scalachess``) and the numeric outputs are pinned in
    ``tests/test_features.py``. See the source references on each function.
 
-2. **Phase-split feature extraction** (stubbed): replays a game, reads per-move evals, and
-   computes per-player features split by opening / middlegame / endgame. Left as a documented
-   ``NotImplementedError`` for the feature-engineering stage to fill in against a stable interface.
+2. **Phase-split feature extraction** (Stage 4): replays a game, reads per-move evals/clocks, and
+   computes per-player move-quality (split by opening / middlegame / endgame), time, and style
+   features. ``build_features`` / ``run_features`` turn instances + games_clean into features.parquet.
 
 LEAKAGE RULE (non-negotiable): features describe *one player's own play*. Never derive a
 feature from the opponent (opponent rating, opponent centipawn loss, rating gap, …). Lichess
@@ -25,6 +25,8 @@ Two DIFFERENT scales are in play; do not conflate them:
 from __future__ import annotations
 
 import math
+import statistics
+from pathlib import Path
 from typing import Any
 
 # --- Win% / winningChances -------------------------------------------------------------
@@ -141,50 +143,259 @@ def game_phase(ply: int, board: Any, cfg: dict[str, Any]) -> str:
     return "middlegame"
 
 
-# --- Phase-split feature extraction (STUB) ---------------------------------------------
+# --- Phase-split feature extraction (Stage 4) ------------------------------------------
 
-def extract_player_features(game: Any, color: bool, cfg: dict[str, Any]) -> dict[str, float]:
-    """Compute one player's feature vector from a single game. (STUB — feature stage.)
+_PHASES = ("opening", "middlegame", "endgame")
+_NAN = float("nan")
+
+
+def _white_cp(pov_score: Any, clamp: int) -> int | None:
+    """A PovScore -> White-POV centipawns, mate folded to +/-clamp, clamped. None if unreadable."""
+    if pov_score is None:
+        return None
+    white = pov_score.white()
+    if white.is_mate():
+        return mate_to_cp(white.mate(), clamp)
+    cp = white.score()
+    if cp is None:
+        return None
+    return max(-clamp, min(clamp, cp))
+
+
+def _agg(records: list[dict[str, Any]], prefix: str) -> dict[str, float]:
+    """Aggregate a list of per-move quality records into a flat feature dict."""
+    n = len(records)
+    cpls = [r["cpl"] for r in records]
+    accs = [r["accuracy"] for r in records]
+    inacc = sum(r["klass"] == "inaccuracy" for r in records)
+    mist = sum(r["klass"] == "mistake" for r in records)
+    blun = sum(r["klass"] == "blunder" for r in records)
+    return {
+        f"{prefix}n_moves": n,
+        f"{prefix}cpl_mean": statistics.fmean(cpls) if cpls else _NAN,
+        f"{prefix}cpl_median": statistics.median(cpls) if cpls else _NAN,
+        f"{prefix}cpl_std": statistics.pstdev(cpls) if len(cpls) > 1 else (0.0 if cpls else _NAN),
+        f"{prefix}cpl_max": max(cpls) if cpls else _NAN,
+        f"{prefix}acc_mean": statistics.fmean(accs) if accs else _NAN,
+        f"{prefix}inaccuracy_count": inacc,
+        f"{prefix}mistake_count": mist,
+        f"{prefix}blunder_count": blun,
+        f"{prefix}inaccuracy_rate": inacc / n if n else _NAN,
+        f"{prefix}mistake_rate": mist / n if n else _NAN,
+        f"{prefix}blunder_rate": blun / n if n else _NAN,
+    }
+
+
+def extract_player_features(
+    game: Any,
+    color: bool,
+    cfg: dict[str, Any],
+    *,
+    increment: int = 0,
+    base_seconds: int | None = None,
+    player_result: str | None = None,
+) -> dict[str, float]:
+    """Compute one player's feature vector from a single game.
+
+    Replays the game once (incremental board), reading each move's stored eval and clock. Produces
+    per-move centipawn-loss / Accuracy% / classification, aggregated overall AND per phase
+    (opening/middlegame/endgame), plus time-management and style features. Describes ``color``'s
+    play only — never the opponent's (leakage rule).
 
     Parameters
     ----------
-    game : chess.pgn.Game
-        A parsed game (from the raw ``movetext`` column). Iterate ``game.mainline()`` nodes;
-        each node carries ``.move``, ``.eval()`` (a ``PovScore``), and ``.clock()`` (seconds).
-    color : bool
-        ``chess.WHITE`` (True) or ``chess.BLACK`` (False) — the player being described.
-    cfg : dict
-        The loaded config (phase boundaries, eval clamp/mate handling, etc.).
+    game : chess.pgn.Game        parsed game (headers optional; movetext carries [%eval]/[%clk]).
+    color : bool                 chess.WHITE (True) / chess.BLACK (False) — the player described.
+    cfg : dict                   loaded config (eval clamp, phase boundaries, feature thresholds).
+    increment, base_seconds      clock base/increment (seconds) for move-time reconstruction.
+    player_result                "win"/"loss"/"draw" for this player (for the conversion feature).
 
-    Returns
-    -------
-    dict
-        Flat ``{feature_name: value}`` for THIS player only. Every "quality" feature is also
-        emitted per phase (opening/middlegame/endgame) — e.g. ``cpl_mean_opening``.
-
-    Implementation notes for the feature stage
-    ------------------------------------------
-    * EVAL ORIENTATION: ``node.eval().white()`` gives the raw White-POV Score. Convert to
-      centipawns with ``.score()`` (None on mate) and handle mate via ``.mate()`` +
-      ``mate_to_cp(...)``. Flip sign for Black to get the mover's POV.
-    * BEFORE/AFTER INDEXING: the eval annotated on a move is the eval of the position AFTER
-      that move. For a move played by ``color``, ``win_before`` = Win% of the position before
-      the move (i.e. the eval on the PREVIOUS ply), ``win_after`` = Win% after the move — both
-      from ``color``'s POV. The very first "before" uses ``cfg['eval']['start_cp']`` (=15).
-    * PER-MOVE QUALITIES (only for moves played by ``color``):
-        - centipawn loss = win-oriented cp drop (or accuracy via ``accuracy_percent``),
-        - ``accuracy_percent(win_before, win_after)``,
-        - ``classify_move(winning_chances(cp_before), winning_chances(cp_after))``.
-    * AGGREGATIONS (overall AND per ``game_phase(ply, board, cfg)``): mean & median centipawn
-      loss, mean Accuracy%, std of centipawn loss (consistency), worst single move,
-      inaccuracy/mistake/blunder counts and per-move rates, plus "accuracy after leaving the
-      opening book".
-    * OPENING/TIME/STYLE: opening ply (book depth), ECO family, mean/var of move times from
-      ``node.clock()`` deltas, share of very-fast moves, time-trouble behaviour, game length,
-      result, captures/checks. See PROJECT_ARCHITECTURE.md §Stage 4.
-    * LEAKAGE: never read the opponent's moves/evals into ``color``'s features.
+    Notes
+    -----
+    The eval annotated on a move is the eval of the position AFTER it (White POV). So ``win_before``
+    for a move is the previous ply's eval (the first uses ``cfg['eval']['start_cp']``), flipped to
+    the mover's POV; ``win_after`` is this ply's eval flipped to the mover's POV. Move-quality is
+    computed only for plies that carry an eval; time/style over all of the player's moves.
     """
-    raise NotImplementedError(
-        "extract_player_features is a stub for the feature-engineering stage; "
-        "the verified primitives above (win_percent, accuracy_percent, classify_move) are ready to use."
+    eval_cfg = cfg["eval"]
+    clamp = eval_cfg["cp_clamp"]
+    start_cp = eval_cfg["start_cp"]
+    opening_max_ply = cfg["phases"]["opening_max_ply"]
+    fcfg = cfg["features"]
+    fast_move_seconds = fcfg["fast_move_seconds"]
+    time_trouble_seconds = fcfg["time_trouble_seconds"]
+    winning_winpct = fcfg["winning_winpct"]
+
+    want_white = bool(color)
+    board = game.board()  # starting position (standard)
+
+    quality: list[dict[str, Any]] = []
+    n_player_moves = n_captures = n_checks = n_time_trouble = 0
+    move_times: list[float] = []
+    prev_remaining = base_seconds
+    reached_winning = False
+    prev_white_cp: int | None = start_cp
+
+    for node in game.mainline():
+        move = node.move
+        mover_white = board.turn  # side to move BEFORE the move == the mover
+        is_capture = board.is_capture(move)
+        board.push(move)
+        gives_check = board.is_check()
+        after_w = _white_cp(node.eval(), clamp)
+
+        if mover_white == want_white:
+            n_player_moves += 1
+            n_captures += is_capture
+            n_checks += gives_check
+
+            remaining = node.clock()
+            if prev_remaining is not None and remaining is not None:
+                spent = prev_remaining - remaining + increment
+                if spent >= 0:
+                    move_times.append(spent)
+            if remaining is not None:
+                prev_remaining = remaining
+                if remaining < time_trouble_seconds:
+                    n_time_trouble += 1
+
+            if after_w is not None and prev_white_cp is not None:
+                mover_after = after_w if want_white else -after_w
+                mover_before = prev_white_cp if want_white else -prev_white_cp
+                win_before = win_percent(mover_before, clamp)
+                win_after = win_percent(mover_after, clamp)
+                if win_after >= winning_winpct:
+                    reached_winning = True
+                quality.append({
+                    "ply": node.ply(),
+                    "phase": game_phase(node.ply(), board, cfg),
+                    "cpl": max(0.0, mover_before - mover_after),
+                    "accuracy": accuracy_percent(win_before, win_after),
+                    "klass": classify_move(
+                        winning_chances(mover_before, clamp), winning_chances(mover_after, clamp)
+                    ),
+                })
+
+        prev_white_cp = after_w
+
+    # --- aggregate ---
+    feats: dict[str, float] = {}
+    feats.update(_agg(quality, ""))
+    for phase in _PHASES:
+        feats.update(_agg([r for r in quality if r["phase"] == phase], f"{phase}_"))
+
+    after_book = [r["accuracy"] for r in quality if r["ply"] > opening_max_ply]
+    feats["acc_after_book"] = statistics.fmean(after_book) if after_book else _NAN
+
+    feats["move_time_mean"] = statistics.fmean(move_times) if move_times else _NAN
+    feats["move_time_std"] = (
+        statistics.pstdev(move_times) if len(move_times) > 1 else (0.0 if move_times else _NAN)
     )
+    feats["move_time_median"] = statistics.median(move_times) if move_times else _NAN
+    feats["n_timed_moves"] = len(move_times)
+    feats["fast_move_share"] = (
+        sum(t < fast_move_seconds for t in move_times) / len(move_times) if move_times else _NAN
+    )
+    feats["time_trouble_share"] = n_time_trouble / n_player_moves if n_player_moves else _NAN
+
+    feats["game_plies"] = board.ply()
+    feats["player_moves"] = n_player_moves
+    feats["n_captures"] = n_captures
+    feats["n_checks"] = n_checks
+    feats["reached_winning"] = int(reached_winning)
+    if player_result is None or not reached_winning:
+        feats["converted_winning"] = _NAN
+    else:
+        feats["converted_winning"] = 1.0 if player_result == "win" else 0.0
+    return feats
+
+
+# --- Stage 4 driver: instances + games_clean -> features.parquet -----------------------
+
+# Identity / label columns carried alongside the numeric features (feature columns follow).
+FEATURE_ID_COLUMNS = ["game_id", "color", "username", "rating", "result", "time_control", "eco", "opening"]
+
+
+def _parse_time_control(time_control: str | None) -> tuple[int | None, int]:
+    """'300+3' -> (300, 3); '-' / bad -> (None, 0)."""
+    if not time_control or time_control == "-":
+        return None, 0
+    base, _, inc = time_control.partition("+")
+    try:
+        return int(base), int(inc or 0)
+    except ValueError:
+        return None, 0
+
+
+def build_features(games_clean_df: Any, instances_df: Any, cfg: dict[str, Any]) -> Any:
+    """Parse each game once and emit one feature row per (game, side), joined to instance labels."""
+    import io
+
+    import chess.pgn
+    import pandas as pd
+
+    labels = {(r.game_id, r.color): r for r in instances_df.itertuples(index=False)}
+    rows: list[dict[str, Any]] = []
+    for g in games_clean_df.itertuples(index=False):
+        game = chess.pgn.read_game(io.StringIO(g.movetext))
+        if game is None:
+            continue
+        base, inc = _parse_time_control(g.time_control)
+        for color_name, want_white in (("white", True), ("black", False)):
+            label = labels.get((g.game_id, color_name))
+            if label is None:
+                continue
+            feats = extract_player_features(
+                game, want_white, cfg,
+                increment=inc, base_seconds=base, player_result=label.result,
+            )
+            feats.update({
+                "game_id": g.game_id, "color": color_name, "username": label.username,
+                "rating": int(label.rating), "result": label.result,
+                "time_control": g.time_control, "eco": g.eco, "opening": g.opening,
+            })
+            rows.append(feats)
+
+    df = pd.DataFrame(rows)
+    if not df.empty:
+        feature_cols = sorted(c for c in df.columns if c not in FEATURE_ID_COLUMNS)
+        df = df[FEATURE_ID_COLUMNS + feature_cols]
+        df["rating"] = df["rating"].astype("int16")
+    return df
+
+
+def run_features(games_path: str | Path, instances_path: str | Path, output_path: str | Path,
+                 cfg: dict[str, Any]) -> Any:
+    """Read games_clean + instances -> feature rows -> features.parquet."""
+    import pandas as pd
+
+    games = pd.read_parquet(games_path)
+    instances = pd.read_parquet(instances_path)
+    df = build_features(games, instances, cfg)
+    Path(output_path).parent.mkdir(parents=True, exist_ok=True)
+    df.to_parquet(output_path, engine="pyarrow", index=False)
+    n_feats = max(0, df.shape[1] - len(FEATURE_ID_COLUMNS))
+    print(f"wrote {len(df):,} feature rows x {n_feats} features to {output_path}")
+    return df
+
+
+def main() -> None:
+    import argparse
+
+    from src.config import load_config
+
+    cfg = load_config()
+    parser = argparse.ArgumentParser(description="Stage 4: build per-player features.")
+    parser.add_argument("--games", default=cfg["outputs"]["games_clean"], help="games_clean parquet")
+    parser.add_argument("--instances", default=cfg["outputs"]["instances"], help="instances parquet")
+    parser.add_argument("--output", default=cfg["outputs"]["features"], help="features parquet")
+    args = parser.parse_args()
+
+    for label, path in (("games_clean", args.games), ("instances", args.instances)):
+        if not Path(path).exists():
+            raise SystemExit(f"{label} not found: {path}\nRun `python -m src.clean` first.")
+    run_features(args.games, args.instances, args.output, cfg)
+
+
+if __name__ == "__main__":
+    main()

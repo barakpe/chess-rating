@@ -38,6 +38,41 @@ phases:
   opening_max_ply: 30            # ~15 full moves; opening lasts until out of book or this ply
   endgame_nonpawn_pieces: 6      # middlegame -> endgame when total non-pawn pieces (both sides) <= this
 
+# --- Cleaning (Stage 2) ---
+clean:
+  min_rating: 400                # drop implausible/corrupt Elo labels below this
+  max_rating: 4000               # ...or above this (Lichess blitz tops out ~3100)
+
+# --- Feature engineering (Stage 4) ---
+features:
+  fast_move_seconds: 1.0         # a move played faster than this counts as "very fast"
+  time_trouble_seconds: 15       # remaining clock below this counts as time trouble
+  winning_winpct: 80             # Win% at/above which a position is "winning" (conversion feature)
+
+# --- Modeling (Stages 5-6) ---
+model:
+  test_size: 0.2                 # grouped hold-out fraction (split by username, never by game)
+  val_size: 0.2                  # grouped validation fraction (carved from train) for early stopping
+  ridge_alpha: 10.0
+  early_stopping_rounds: 50
+  quantiles: [0.05, 0.5, 0.95]   # lower / median / upper -> a 90% prediction interval
+  lgbm:
+    n_estimators: 3000           # upper bound; early stopping picks the real count
+    learning_rate: 0.03
+    num_leaves: 63
+  tune:
+    enabled: false               # Optuna hyperparameter search (opt-in via --tune)
+    n_trials: 25
+
+# --- Evaluation & error analysis (Stages 7-8) ---
+evaluate:
+  cv_folds: 5                    # GroupKFold folds (by username)
+  aggregation_k: [1, 2, 3, 5, 10, 20]      # games-per-player for the aggregation curve
+  aggregation_min_players: 30    # only report a K if >= this many players have >= K test games
+  calibration_bins: 10
+  error_analysis_top_n: 20       # largest-residual games to inspect
+  shap_max_display: 15           # features shown in the SHAP summary
+
 # --- Paths ---
 paths:
   raw: data/raw
@@ -45,4 +80,7 @@ paths:
   figures: reports/figures
 
 outputs:
-  blitz_sample: data/processed/blitz_sample.parquet
+  blitz_sample: data/processed/blitz_sample.parquet   # Stage 1 (ingest)
+  games_clean: data/processed/games_clean.parquet     # Stage 2 (clean/dedup)
+  instances: data/processed/instances.parquet         # Stage 3 (2 rows/game, per-player labels)
+  features: data/processed/features.parquet           # Stage 4 (per-player feature vectors)

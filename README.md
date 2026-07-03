@@ -31,8 +31,12 @@ Python 3.10+. Stockfish is **not** needed (Option A reads evals already in the P
 | `config.yaml` | **Single source of truth** for every knob (month, sample size, thresholds, seed). No magic numbers in code. |
 | `src/config.py` | Loads + validates `config.yaml`, resolves/creates paths. |
 | `src/ingest.py` | Stage 1: stream the `.pgn.zst`, filter to blitz + has-eval, reservoir-sample, write parquet. |
-| `src/features.py` | Verified Win%/Accuracy%/move-classification math + phase-split feature extraction (stub). |
-| `tests/` | `test_features.py` (math), `test_ingest.py` (fixture smoke test), `fixtures/` (tiny synthetic dump). |
+| `src/clean.py` | Stages 2–3: dedup/clean + explode into per-player instances (opponent dropped). |
+| `src/features.py` | Verified Win%/Accuracy%/classification math + Stage 4 phase-split feature extraction. |
+| `src/model.py` | Stages 5–6: baselines (mean, copy-opponent) + ridge/LightGBM, early stopping, Optuna, quantile intervals. |
+| `src/evaluate.py` | Stages 7–8: grouped metrics, coverage/pinball, bands + confusion, aggregation curve, calibration, SHAP, error analysis, ablations. |
+| `src/plotting.py` | Shared matplotlib style + `save_fig` (every deck figure → `reports/figures/`). |
+| `tests/` | Unit tests per stage + `fixtures/` (tiny synthetic dump for the ingest smoke test). |
 | `data/` | **Gitignored, never committed.** `raw/` = downloaded dumps, `processed/` = parquet outputs. |
 | `notebooks/` | Exploration only; numbered, run top-to-bottom. Added in their phases. |
 | `reports/figures/` | Saved PNGs the slides pull from. |
@@ -50,9 +54,19 @@ parallel against the interface (not by reading each other's code).
 | # | Command | Input | Output |
 |---|---|---|---|
 | 1 | `python -m src.ingest` | `data/raw/lichess_db_standard_rated_<month>.pgn.zst` | `data/processed/blitz_sample.parquet` |
-| 2 | `python -m src.clean` *(later)* | `blitz_sample.parquet` | `games_clean.parquet`, `instances.parquet` |
-| 3 | `python -m src.features` *(later)* | `instances.parquet` | `features.parquet` |
-| 4 | notebooks `01`→`04` *(later)* | `features.parquet` | figures + `reports/results.md` |
+| 2–3 | `python -m src.clean` | `blitz_sample.parquet` | `games_clean.parquet`, `instances.parquet` |
+| 4 | `python -m src.features` | `games_clean.parquet` + `instances.parquet` | `features.parquet` |
+| 5 | `python -m src.model` | `features.parquet` + `games_clean.parquet` | baseline MAE/RMSE → `reports/results.md` |
+| 6 | `python -m src.evaluate` `[--tune]` | `features.parquet` + `games_clean.parquet` | improved model + eval + error analysis → figures + `reports/results.md` |
+| 7 | notebooks `01`→`04` *(later)* | `features.parquet` | figures + `reports/results.md` |
+
+**Stage 6 (`src/evaluate.py`)** trains the improved model on the full engine+clock features and reports
+the improvement table (no-engine baseline → +engine → tuned), the **90% prediction interval** from
+three quantile LightGBMs (empirical coverage + pinball loss), rating-band accuracy + confusion matrix,
+the **aggregation curve** (MAE vs games-per-player — single-game noise vs precision by averaging),
+calibration, and **SHAP** importances. Stage 8 adds error analysis (largest residuals, residual by band
+& game length) and **feature-group ablations**. Everything is split by `username` (never by game).
+Figures are written to `reports/figures/`. Add `--tune` for Optuna hyperparameter search.
 
 **Sanity gate:** run `pytest` before every push (math regression + the fixture smoke test).
 
@@ -91,9 +105,49 @@ interface Person A (ingest) hands to B/C (features/model).
 | `movetext` | string | `StringExporter` | raw SAN + `[%eval]`/`[%clk]`; re-parsed by `features.py` |
 | `n_plies` | int16 | computed | half-move count (post `min_plies` filter) |
 
-**No opponent-derived columns.** Instance-explode (2 rows/game, one per side, labelled with *that*
-player's rating, opponent rating **dropped**) is Stage 3 — `white_elo`/`black_elo` are the raw
-material for it, not model features.
+`white_elo`/`black_elo` are the raw material for the per-player labels below — not model features.
+
+## Parquet schema contract — `instances.parquet`
+
+Stage 2–3 (`src/clean.py`) dedups games, drops unusable labels, and **explodes each game into two
+rows, one per player** (defined once as `src.clean.INSTANCE_COLUMNS`). Each row describes only that
+player and is labelled with that player's rating. `games_clean.parquet` keeps the full per-game rows
+(same schema as `blitz_sample`) so the feature stage can fetch `movetext` by `game_id`.
+
+| column | dtype | note |
+|---|---|---|
+| `game_id` | string | joins back to `games_clean` for the `movetext` |
+| `color` | string | `white` / `black` |
+| `username` | string | this player — the **grouped-split key** (never split by game) |
+| `rating` | int16 | this player's Elo — the regression **label** |
+| `result` | string | `win` / `loss` / `draw`, from this player's point of view |
+| `time_control`, `eco`, `opening`, `n_plies` | string / int16 | game-level context shared by both sides |
+
+**Leakage guard (enforced in code):** an instance row **never** carries the opponent's rating or
+username. Lichess matches similar ratings, so any opponent-derived signal leaks the label. Always
+split train/test by `username` (GroupKFold / grouped hold-out), never by game.
+
+> **Provisional ratings** stay unfiltered here — the status isn't in exported PGN, so `config.yaml`'s
+> `drop_provisional` is a documented no-op (see Limitations).
+
+## `features.parquet` (Stage 4)
+
+`src/features.py` parses each game once and emits **one row per instance** (`game_id, color,
+username, rating, result, time_control, eco, opening` + ~60 numeric features). Built on the verified
+`win_percent`/`accuracy_percent`/`classify_move` primitives; every quality feature is computed
+overall **and** per phase (`opening_` / `middlegame_` / `endgame_`). Feature groups:
+
+- **Move quality:** `cpl_{mean,median,std,max}` (centipawn loss), `acc_mean` (Lichess Accuracy%),
+  `{inaccuracy,mistake,blunder}_{count,rate}`, and `acc_after_book` (post-opening accuracy — the
+  "knew theory, then collapsed" signal). Move class thresholds are on the winningChances scale.
+- **Time:** `move_time_{mean,std,median}` from `[%clk]` deltas, `fast_move_share`, `time_trouble_share`.
+- **Style:** `game_plies`, `player_moves`, `n_captures`, `n_checks`, `reached_winning`,
+  `converted_winning` (did they win from a winning position?).
+
+Same leakage guarantee: the eval before/after a move is taken from *this* player's POV only; no
+opponent-derived quantity enters a feature. Cross-game aggregates (opening-diversity entropy, the
+per-K aggregation curve) are deliberately **not** here — they belong to evaluation (Stage 7), since a
+single-game prediction can't see a player's other games.
 
 ---
 
@@ -132,4 +186,10 @@ must run top-to-bottom (Restart & Run All) before they're considered done.
   drop provisional-rated (noisier) labels from the dump. Recorded so the intent is explicit.
 - **Single-game noise floor:** one blitz game can't pin a rating; precision comes from aggregating
   across a player's games. This is a finding, not a bug.
+- **Aggregation-curve cohort:** a uniform *game* sample has few players with many games, so each K in
+  the aggregation curve is a different, shrinking cohort (higher-K points are noisier and not
+  apples-to-apples). Backlog: a player-stratified sample (pick players, take all their games) would
+  give a cleaner, monotone curve.
+- **Interval calibration:** the raw 90% quantile interval under-covers (~85% empirically); backlog is
+  conformalized quantile regression (CQR) to recalibrate width for guaranteed marginal coverage.
 - **Scope:** blitz only; results may not transfer to rapid/classical.
