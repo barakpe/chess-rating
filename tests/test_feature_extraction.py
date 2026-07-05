@@ -135,6 +135,107 @@ def _games_clean_from_keep():
     return pd.DataFrame([row], columns=INGEST_COLUMNS)
 
 
+def test_missing_clock_game_scramble_nan():
+    """Same clockless game as test_missing_clock_game: with no timed moves at all, every
+    scramble_* feature is unobservable (NaN), not a true zero, and has_scramble reads 0."""
+    pgn = (
+        '[Event "Test"]\n[White "a"]\n[Black "b"]\n[Result "*"]\n\n'
+        "1. e4 { [%eval 0.20] } 1... e5 { [%eval 0.18] } "
+        "2. Nf3 { [%eval 0.22] } 2... Nc6 { [%eval 0.19] } *\n"
+    )
+    game = chess.pgn.read_game(io.StringIO(pgn))
+    cfg = load_config()
+    w = extract_player_features(game, chess.WHITE, cfg, increment=0, base_seconds=300)
+
+    assert w["has_clock"] == 0
+    assert w["has_scramble"] == 0
+    for feat in (
+        "scramble_n_moves", "scramble_share", "scramble_move_time_mean", "scramble_move_time_std",
+        "scramble_cpl_mean", "scramble_blunder_rate", "scramble_cpl_delta",
+    ):
+        assert math.isnan(w[feat]), f"{feat} should be NaN, got {w[feat]}"
+
+
+def test_keep_game_no_scramble():
+    """The 14-ply fixture keep game is played with base_seconds=300 (well above the 30s
+    scramble_seconds threshold) and White's clock per test_extract_white_hand_verified never
+    drops below ~292s, so it never dips under the scramble threshold: scramble_n_moves is a
+    true 0 (clock IS present), not NaN, and the aggregates over zero scramble moves are NaN."""
+    cfg = load_config()
+    assert cfg["features"]["scramble_seconds"] == 30
+    w = extract_player_features(_keep_game(), chess.WHITE, cfg, increment=0, base_seconds=300)
+
+    assert w["has_clock"] == 1
+    assert w["scramble_n_moves"] == 0
+    assert w["scramble_share"] == 0.0
+    assert w["has_scramble"] == 0
+    for feat in (
+        "scramble_move_time_mean", "scramble_move_time_std",
+        "scramble_cpl_mean", "scramble_blunder_rate", "scramble_cpl_delta",
+    ):
+        assert math.isnan(w[feat]), f"{feat} should be NaN, got {w[feat]}"
+
+
+def test_scramble_features_hand_verified():
+    """Crafted PGN: base clock 60s. White's remaining clock (BEFORE the move) is 60s and 58s on
+    its first two moves (not scrambles), then 25s and 20s on moves 3 and 4 (< scramble_seconds=30
+    -> scrambles). Move 3 is a huge eval swing (a blunder); move 4 is a tiny one (not).
+
+    White's mover-POV cpl per move: [0, 0, 620, 5] (before/after eval pairs: 15->20, 18->25,
+    20->-600, -580->-585). Overall cpl_mean = 625/4 = 156.25; scramble-only cpl_mean (moves 3,4)
+    = 625/2 = 312.5. Scramble think-times are 25-20=5s and 20-10=10s -> mean 7.5, pstdev 2.5.
+    """
+    pgn = (
+        '[Event "Test"]\n[White "a"]\n[Black "b"]\n[Result "*"]\n\n'
+        "1. e4 { [%eval 0.20] [%clk 0:00:58] } 1... e5 { [%eval 0.18] } "
+        "2. Nf3 { [%eval 0.25] [%clk 0:00:25] } 2... Nc6 { [%eval 0.20] } "
+        "3. Bc4 { [%eval -6.00] [%clk 0:00:20] } 3... Bc5 { [%eval -5.80] } "
+        "4. c3 { [%eval -5.85] [%clk 0:00:10] } *\n"
+    )
+    game = chess.pgn.read_game(io.StringIO(pgn))
+    cfg = load_config()
+    w = extract_player_features(game, chess.WHITE, cfg, increment=0, base_seconds=60)
+
+    assert w["n_moves"] == 4
+    assert w["player_moves"] == 4
+    assert w["has_clock"] == 1
+    assert w["has_scramble"] == 1
+
+    # Clock entering moves 1,2 is 60s,58s (not < 30); entering moves 3,4 is 25s,20s (< 30).
+    assert w["scramble_n_moves"] == 2
+    assert w["scramble_share"] == pytest.approx(0.5)
+
+    assert w["cpl_mean"] == pytest.approx(156.25)
+    assert w["scramble_cpl_mean"] == pytest.approx(312.5)
+    assert w["scramble_cpl_delta"] == pytest.approx(312.5 - 156.25)
+
+    # Move 3 (cpl 620, a huge eval swing from +20 to -600) is a blunder; move 4 (cpl 5) is not.
+    assert w["scramble_blunder_rate"] == pytest.approx(0.5)
+
+    # Scramble-move think times: 25->20 (5s, spent=5) and 20->10 (10s, spent=10).
+    assert w["scramble_move_time_mean"] == pytest.approx(7.5)
+    assert w["scramble_move_time_std"] == pytest.approx(2.5)
+
+
+def test_scramble_boundary_exactly_30_excluded():
+    """remaining == scramble_seconds exactly is NOT a scramble (strict <). base_seconds=30: the
+    first move's clock-before is exactly 30 (excluded); it drops to 29 for the second move
+    (included). scramble_n_moves must be 1, not 2 or 0."""
+    pgn = (
+        '[Event "Test"]\n[White "a"]\n[Black "b"]\n[Result "*"]\n\n'
+        "1. e4 { [%eval 0.20] [%clk 0:00:29] } 1... e5 { [%eval 0.18] } "
+        "2. Nf3 { [%eval 0.22] [%clk 0:00:25] } *\n"
+    )
+    game = chess.pgn.read_game(io.StringIO(pgn))
+    cfg = load_config()
+    w = extract_player_features(game, chess.WHITE, cfg, increment=0, base_seconds=30)
+
+    assert w["player_moves"] == 2
+    assert w["scramble_n_moves"] == 1
+    assert w["scramble_share"] == pytest.approx(0.5)
+    assert w["has_scramble"] == 1
+
+
 def test_build_features_end_to_end_no_leakage():
     cfg = load_config()
     games_clean = _games_clean_from_keep()

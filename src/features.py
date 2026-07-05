@@ -225,9 +225,15 @@ def extract_player_features(
 
     NaN contract: an unobserved quantity is NaN, not 0 — 0 is reserved for a true zero-exposure
     count (``n_moves``, ``n_timed_moves``) or a genuinely-computed zero. ``move_time_std`` is NaN
-    for fewer than 2 timed moves; ``time_trouble_share`` is NaN with no timed moves at all. Four
-    flags (``has_opening``, ``has_middlegame``, ``has_endgame``, ``has_clock``) make phase/clock
-    absence directly splittable instead of relying on trees inferring it from the NaNs.
+    for fewer than 2 timed moves; ``time_trouble_share`` is NaN with no timed moves at all. Five
+    flags (``has_opening``, ``has_middlegame``, ``has_endgame``, ``has_clock``, ``has_scramble``)
+    make phase/clock absence directly splittable instead of relying on trees inferring it from the
+    NaNs. The clock-scramble block (``scramble_*``: moves where the player's remaining clock BEFORE
+    the move was under ``cfg['features']['scramble_seconds']``) follows the same rule: every
+    ``scramble_*`` feature is NaN (``has_scramble`` reads 0) when the game has no timed moves at
+    all; ``scramble_n_moves``/``scramble_share`` are true zeros (not NaN) when clock data exists but
+    no move ever fell under the threshold; ``scramble_cpl_mean``/``scramble_blunder_rate``/
+    ``scramble_cpl_delta`` are NaN whenever there is no eval'd scramble move to aggregate.
     """
     eval_cfg = cfg["eval"]
     clamp = eval_cfg["cp_clamp"]
@@ -236,6 +242,7 @@ def extract_player_features(
     fcfg = cfg["features"]
     fast_move_seconds = fcfg["fast_move_seconds"]
     time_trouble_seconds = fcfg["time_trouble_seconds"]
+    scramble_seconds = fcfg["scramble_seconds"]
     winning_winpct = fcfg["winning_winpct"]
 
     want_white = bool(color)
@@ -244,6 +251,8 @@ def extract_player_features(
     quality: list[dict[str, Any]] = []
     n_player_moves = n_captures = n_checks = n_time_trouble = 0
     move_times: list[float] = []
+    scramble_move_times: list[float] = []
+    scramble_n_moves = 0
     prev_remaining = base_seconds
     reached_winning = False
     prev_white_cp: int | None = start_cp
@@ -261,11 +270,19 @@ def extract_player_features(
             n_captures += is_capture
             n_checks += gives_check
 
+            # Captured BEFORE prev_remaining is updated below: a scramble move is one where the
+            # player's clock, as it stood going INTO this move, was already under the threshold.
+            is_scramble = prev_remaining is not None and prev_remaining < scramble_seconds
+            if is_scramble:
+                scramble_n_moves += 1
+
             remaining = node.clock()
             if prev_remaining is not None and remaining is not None:
                 spent = prev_remaining - remaining + increment
                 if spent >= 0:
                     move_times.append(spent)
+                    if is_scramble:
+                        scramble_move_times.append(spent)
             if remaining is not None:
                 prev_remaining = remaining
                 if remaining < time_trouble_seconds:
@@ -286,6 +303,7 @@ def extract_player_features(
                     "klass": classify_move(
                         winning_chances(mover_before, clamp), winning_chances(mover_after, clamp)
                     ),
+                    "scramble": is_scramble,
                 })
 
         prev_white_cp = after_w
@@ -313,6 +331,40 @@ def extract_player_features(
     )
     # No timed moves at all -> undefined, not 0 (0 would misleadingly read as "never in time trouble").
     feats["time_trouble_share"] = n_time_trouble / n_player_moves if move_times else _NAN
+
+    # --- clock-scramble block (moves with remaining clock, before the move, < scramble_seconds) ---
+    if not move_times:
+        # No clock at all: every scramble feature is unobservable, not a true zero.
+        feats["scramble_n_moves"] = _NAN
+        feats["scramble_share"] = _NAN
+        feats["scramble_move_time_mean"] = _NAN
+        feats["scramble_move_time_std"] = _NAN
+        feats["scramble_cpl_mean"] = _NAN
+        feats["scramble_blunder_rate"] = _NAN
+        feats["scramble_cpl_delta"] = _NAN
+        feats["has_scramble"] = 0
+    else:
+        scramble_quality = [r for r in quality if r["scramble"]]
+        scramble_cpls = [r["cpl"] for r in scramble_quality]
+        n_scramble_quality = len(scramble_quality)
+        scramble_blunders = sum(r["klass"] == "blunder" for r in scramble_quality)
+
+        feats["scramble_n_moves"] = scramble_n_moves
+        feats["scramble_share"] = scramble_n_moves / n_player_moves
+        feats["scramble_move_time_mean"] = (
+            statistics.fmean(scramble_move_times) if scramble_move_times else _NAN
+        )
+        feats["scramble_move_time_std"] = (
+            statistics.pstdev(scramble_move_times) if len(scramble_move_times) > 1 else _NAN
+        )
+        feats["scramble_cpl_mean"] = statistics.fmean(scramble_cpls) if scramble_cpls else _NAN
+        feats["scramble_blunder_rate"] = (
+            scramble_blunders / n_scramble_quality if n_scramble_quality else _NAN
+        )
+        # Plain float arithmetic: NaN on either side (no scramble evals, or no evals at all)
+        # propagates to NaN automatically.
+        feats["scramble_cpl_delta"] = feats["scramble_cpl_mean"] - feats["cpl_mean"]
+        feats["has_scramble"] = int(scramble_n_moves > 0)
 
     feats["game_plies"] = board.ply()
     feats["player_moves"] = n_player_moves

@@ -51,6 +51,8 @@ clean:
 features:
   fast_move_seconds: 1.0         # a move played faster than this counts as "very fast"
   time_trouble_seconds: 15       # remaining clock below this counts as time trouble
+  scramble_seconds: 30           # remaining clock (before the move) below this = clock scramble;
+                                 # scramble_* features measure quality/tempo under this pressure
   winning_winpct: 80             # Win% at/above which a position is "winning" (conversion feature)
 
 # --- Modeling (Stages 5-6) ---
@@ -62,6 +64,9 @@ model:
   early_stopping_rounds: 50
   quantiles: [0.05, 0.5, 0.95]   # lower / median / upper -> a 90% prediction interval
   cqr_two_sided: false           # CQR: one symmetric correction (false) or per-side alpha/2 (true)
+  mondrian_cqr: true             # band-conditional (Mondrian) CQR by PREDICTED-median band is the
+                                 # headline interval; plain CQR always computed alongside for comparison
+  mondrian_min_calib: 200        # predicted-bands with fewer calib scores fall back to the global correction
   balance_strength: 0.5          # tail reweighting exponent (0=uniform, 1=full inverse-frequency)
   lgbm:
     n_estimators: 3000           # upper bound; early stopping picks the real count
