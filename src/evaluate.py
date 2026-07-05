@@ -612,6 +612,9 @@ def _append_results_md(path: str | Path, r: dict[str, Any], tuned: bool) -> None
     ]
     if "tuned_mae" in r:
         lines.append(f"| + tuned | {r['tuned_mae']:.1f} | {r['tuned_rmse']:.1f} |")
+    if r.get("best_params"):
+        # Persist the winning hyperparameters — the Optuna study lives only in this process.
+        lines.append(f"\n- best_params: `{r['best_params']}`")
     p, pp = r["point"], r["per_player"]
     lines += [
         "",

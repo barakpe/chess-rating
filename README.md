@@ -197,12 +197,16 @@ must run top-to-bottom (Restart & Run All) before they're considered done.
 - **Single-game noise floor:** one blitz game can't pin a rating; precision comes from aggregating
   across a player's games. This is a finding, not a bug.
 - **Tail error is (mostly) irreducible single-game noise, not fixable bias.** Error concentrates at
-  the rating extremes (0–1200 MAE 347, over-predicting; 2000+ MAE 280, under-predicting) vs ~180 in
-  the middle. We tested corrections (`python -m src.evaluate --tail-study`): post-hoc de-shrink fits a
-  slope of **≈1.01** — i.e. the model is **already calibrated** (E[true|pred] ≈ pred) — and band
-  reweighting only *redistributes* error across bands (overall MAE flat-to-worse). So the tail
-  shrinkage is the statistically optimal response to weak single-game evidence, not a bug. The real
-  levers are **aggregation** (more games per player) and **better tail-discriminating features**.
+  the rating extremes (300k: 0–1200 MAE 313, over-predicting; 2000+ MAE 282, under-predicting) vs
+  ~190 in the middle. We tested corrections (`python -m src.evaluate --tail-study`): post-hoc
+  de-shrink fits a slope of **≈1.0** — i.e. the model is **already calibrated** (E[true|pred] ≈
+  pred) — and band reweighting only *redistributes* error across bands. We also added
+  **clock-scramble features** (quality/tempo with <30s on the clock, incl. the degradation delta
+  vs overall CPL): individually informative (median degradation +8 cpl under pressure) but overall
+  and tail MAE unchanged (239.4 → 239.1; tails 313/282 → 313/282) — the existing clock+quality
+  features already carry the signal. So the tail shrinkage is the statistically optimal response
+  to weak single-game evidence, not a bug; the one real lever is **aggregation** (more games per
+  player: MAE 235 at K=1 → 200 at K=5).
 - **Aggregation-curve cohort:** a uniform *game* sample has few players with many games, so each K in
   the aggregation curve is a different, shrinking cohort (higher-K points are noisier and not
   apples-to-apples). `ingest.py` now also writes a **player-cohort sample**
@@ -213,8 +217,12 @@ must run top-to-bottom (Restart & Run All) before they're considered done.
   quantile interval under-covers (~85%). We now apply split conformalized quantile regression
   (CQR): a dedicated grouped **calibration split** (never seen by any fit; see `model.calib_size`)
   supplies a finite-sample correction that widens/narrows the interval for guaranteed *marginal*
-  coverage (measured: raw 84.6% → CQR 90.8%). The guarantee is marginal only: per-band coverage
-  still dips at the extremes (~75% at 0–1200, ~82% at 2000+) because interval width barely adapts
-  across bands (see `reports/figures/interval_by_band.png`). Backlog: band-conditional (Mondrian)
-  CQR for per-band guarantees.
+  coverage (measured on 300k: raw 87.4% → CQR 89.8%). The guarantee is marginal only: per-band
+  coverage still dips at the extremes (~78% at 0–1200, ~81% at 2000+) because interval width barely
+  adapts across bands (see `reports/figures/interval_by_band.png`). **Band-conditional (Mondrian)
+  CQR was implemented and measured** (`model.mondrian_cqr`): it guarantees coverage conditional on
+  the *predicted* band (the only test-time-legal conditioning), but per-*true*-band coverage is
+  unchanged vs plain CQR (78/96/98/98/95/81) — prediction shrinkage leaves the extreme predicted
+  bands nearly empty, so no test-time-legal recalibration can fix true-band tail coverage. This is
+  the interval-space face of the single-game noise floor, not a calibration defect.
 - **Scope:** blitz only; results may not transfer to rapid/classical.

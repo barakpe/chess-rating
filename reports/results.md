@@ -97,3 +97,38 @@ n_train=329353, n_calib=59124, n_test=120513, n_features=69
 - band accuracy: 36.5% exact, 75.9% adjacent
 - aggregation MAE: K1=235, K2=209, K3=202, K5=200, K10=203, K20=218
 - ablation (MAE↑ when dropped): engine +33.8, clock +9.8, style +8.1, opening +8.0
+
+## 2026-07-06 01:12 — improved model (tuned)
+n_train=329353, n_calib=59124, n_test=120513, n_features=69
+
+| stage | MAE | RMSE |
+|---|---|---|
+| no-engine baseline | 293.4 | — |
+| + engine/clock | 239.4 | 300.4 |
+| + tuned | 237.4 | 297.9 |
+
+- median AE 201, R² 0.552, Spearman 0.730, within 100/200 Elo 26%/50%, bias -3.3
+- per-player (all games averaged): **216.7** MAE over 50357 players
+- 90% interval coverage: raw 87.1% -> CQR **89.8%** (width 931 -> 992 Elo; correction lo=30.0, hi=30.0)
+- coverage by band: 0-1200 78%, 1200-1400 95%, 1400-1600 98%, 1600-1800 98%, 1800-2000 95%, 2000-3000 80%
+- band accuracy: 36.6% exact, 76.2% adjacent
+- aggregation MAE: K1=233, K2=207, K3=201, K5=199, K10=202, K20=217
+- ablation (MAE↑ when dropped): engine +33.8, clock +9.8, style +8.1, opening +8.0
+
+## 2026-07-06 01:29 — improved model
+n_train=329353, n_calib=59124, n_test=120513, n_features=77
+
+| stage | MAE | RMSE |
+|---|---|---|
+| no-engine baseline | 293.4 | — |
+| + engine/clock | 239.1 | 300.1 |
+
+- median AE 202, R² 0.545, Spearman 0.726, within 100/200 Elo 26%/50%, bias -3.4
+- per-player (all games averaged): **218.2** MAE over 50357 players
+- 90% interval coverage: raw 87.4% -> CQR(plain) **89.8%** (width 945 -> 999 Elo; correction lo=27.1, hi=27.1)
+- Mondrian CQR: **89.9%** (width 1001 Elo) — headline
+- coverage by band (headline=mondrian): 0-1200 78%, 1200-1400 96%, 1400-1600 98%, 1600-1800 98%, 1800-2000 95%, 2000-3000 81%
+- per-band coverage, plain/Mondrian: 0-1200 78%/78%, 1200-1400 95%/96%, 1400-1600 98%/98%, 1600-1800 99%/98%, 1800-2000 95%/95%, 2000-3000 80%/81%
+- band accuracy: 36.4% exact, 75.9% adjacent
+- aggregation MAE: K1=235, K2=209, K3=202, K5=200, K10=203, K20=217
+- ablation (MAE↑ when dropped): engine +33.6, clock +9.1, opening +8.2, style +7.9
