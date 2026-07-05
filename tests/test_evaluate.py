@@ -180,6 +180,23 @@ def test_run_evaluation_end_to_end(tmp_path):
     assert len(r["ablations"]) >= 1
     assert set(cfg["model"]["quantiles"]) == set(r["pinball"].keys())
 
+    # --- Mondrian (band-conditional) CQR: computed alongside plain CQR, headline when enabled ---
+    assert 0.0 <= r["coverage_cqr_plain"] <= 1.0
+    assert 0.0 <= r["coverage_cqr_mondrian"] <= 1.0
+    assert r["coverage_by_band_mondrian"]               # non-empty
+    for b in r["coverage_by_band_mondrian"]:
+        assert set(b.keys()) == {"band", "n", "coverage", "mean_width"}
+        assert b["n"] > 0
+        assert 0.0 <= b["coverage"] <= 1.0
+    assert len(r["mondrian_corrections"]) == len(cfg["rating_bands"]) - 1   # every band covered
+
+    # the loaded config has model.mondrian_cqr: true -> Mondrian must be the headline interval.
+    assert cfg["model"]["mondrian_cqr"] is True
+    assert r["mondrian_headline"] is True
+    assert r["coverage"] == pytest.approx(r["coverage_cqr_mondrian"])
+    assert r["mean_interval_width"] == pytest.approx(r["mean_interval_width_mondrian"])
+    assert r["coverage_by_band"] == r["coverage_by_band_mondrian"]
+
 
 def test_run_tail_study_smoke(tmp_path):
     cfg = load_config()

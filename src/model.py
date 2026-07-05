@@ -364,6 +364,69 @@ def apply_conformal(
     return {"lower": lower, "median": median, "upper": upper}
 
 
+def predicted_bands(median: np.ndarray, bands: list[int]) -> np.ndarray:
+    """Band index (0..len(bands)-2) for each row from its PREDICTED median — test-time legal.
+
+    Mirrors ``evaluate.to_bands`` but lives here so Mondrian CQR doesn't require model.py to import
+    from evaluate.py (the dependency must only run the other way).
+    """
+    return np.digitize(np.asarray(median, float), bands[1:-1])
+
+
+def conformal_correction_by_band(
+    interval: dict[str, np.ndarray], y: np.ndarray, alpha: float, bands: list[int],
+    two_sided: bool = False, min_n: int = 200,
+) -> dict[int, tuple[float, float]]:
+    """Mondrian (band-conditional) split-CQR: one correction per PREDICTED-median band.
+
+    Each calibration row is assigned a band from ``interval["median"]`` (never from ``y`` — banding
+    on the true label would not be test-time legal, since the true label is exactly what we don't
+    have at inference). A band with fewer than ``min_n`` calibration rows falls back to the pooled
+    global correction (too few nonconformity scores to estimate a stable per-band quantile). Returns
+    a correction for EVERY band index 0..len(bands)-2, so callers never need a fallback of their own.
+
+    CAVEAT: because banding is by PREDICTED median and the point model shrinks predictions toward the
+    mean, games whose TRUE rating sits in an extreme band often have a predicted median that lands in
+    an interior band. Mondrian CQR therefore improves coverage conditional on the PREDICTION, which in
+    turn markedly improves — but cannot guarantee — coverage conditional on the TRUE band.
+    """
+    y = np.asarray(y, float)
+    band_idx = predicted_bands(interval["median"], bands)
+    global_correction = conformal_correction(interval, y, alpha, two_sided)
+
+    out: dict[int, tuple[float, float]] = {}
+    for b in range(len(bands) - 1):
+        m = band_idx == b
+        if m.sum() >= min_n:
+            sub = {k: np.asarray(v)[m] for k, v in interval.items()}
+            out[b] = conformal_correction(sub, y[m], alpha, two_sided)
+        else:
+            out[b] = global_correction
+    return out
+
+
+def apply_conformal_by_band(
+    interval: dict[str, np.ndarray], corrections: dict[int, tuple[float, float]], bands: list[int],
+) -> dict[str, np.ndarray]:
+    """Apply per-band Mondrian corrections; band comes from ``interval["median"]`` (test-time legal).
+
+    Same ordering clip as ``apply_conformal``: lower = min(lower - lo, median), upper = max(upper + hi,
+    median), just with a (lo, hi) that varies by predicted band instead of one global pair.
+    """
+    band_idx = predicted_bands(interval["median"], bands)
+    median = np.asarray(interval["median"], float)
+    lower = np.asarray(interval["lower"], float)
+    upper = np.asarray(interval["upper"], float)
+
+    lo_by_band = np.array([corrections[b][0] for b in range(len(bands) - 1)], float)
+    hi_by_band = np.array([corrections[b][1] for b in range(len(bands) - 1)], float)
+    lo, hi = lo_by_band[band_idx], hi_by_band[band_idx]
+
+    new_lower = np.minimum(lower - lo, median)
+    new_upper = np.maximum(upper + hi, median)
+    return {"lower": new_lower, "median": median, "upper": new_upper}
+
+
 def tune_lgbm(x, y, groups, cfg) -> dict[str, Any]:
     """Optuna TPE search minimising grouped-CV MAE. Returns the best hyperparameters."""
     import lightgbm as lgb

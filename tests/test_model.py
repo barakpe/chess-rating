@@ -15,14 +15,17 @@ from src.model import (  # noqa: E402
     _conformal_quantile,
     add_opponent_rating,
     apply_conformal,
+    apply_conformal_by_band,
     band_sample_weights,
     conformal_correction,
+    conformal_correction_by_band,
     evaluate,
     grouped_split,
     grouped_train_val_calib_test,
     make_ridge,
     mae,
     predict_interval,
+    predicted_bands,
     rmse,
 )
 
@@ -191,3 +194,104 @@ def test_ridge_tolerates_nan_numeric_feature():
 
     ridge = make_ridge(alpha=1.0)
     ridge.fit(x, y)  # must not raise despite the NaN in a numeric feature column
+
+
+def test_conformal_correction_by_band_covers_every_band_and_falls_back_when_thin():
+    bands = [0, 1200, 1400, 1600, 1800, 2000, 3000]
+    rng = np.random.RandomState(0)
+    median = np.concatenate([
+        rng.uniform(700, 1150, 200),    # band 0: plenty of rows, tight scores
+        rng.uniform(1210, 1390, 5),     # band 1: THIN (< min_n), huge-outlier scores
+    ])                                   # bands 2..5: zero rows -> must also fall back
+    y = np.concatenate([
+        median[:200] + rng.normal(0, 20, 200),
+        median[200:] + rng.normal(0, 5000, 5),   # far larger scale -> pooled quantile shifts a lot
+    ])
+    interval = {"lower": median - 1.0, "upper": median + 1.0, "median": median}
+
+    corrections = conformal_correction_by_band(interval, y, alpha=0.1, bands=bands, min_n=20)
+    global_correction = conformal_correction(interval, y, 0.1, False)
+
+    assert set(corrections.keys()) == set(range(len(bands) - 1))   # every band index present
+    assert corrections[1] == global_correction    # thin band (5 rows < min_n=20) -> global fallback
+    for b in (2, 3, 4, 5):                        # empty bands -> global fallback too
+        assert corrections[b] == global_correction
+    assert corrections[0] != global_correction     # the well-populated band got its OWN correction
+
+
+def test_mondrian_cqr_fixes_heteroscedastic_tail_undercoverage():
+    """Per-band coverage under Mondrian stays near 90% at both rating extremes; plain CQR does not.
+
+    y ~ N(median, sigma(band)) with sigma much larger in the extreme bands (0 and 5) than in the
+    middle four; a deliberately tiny, fixed raw interval (median +/- 1) so essentially the whole
+    interval width has to come from the conformal correction. Predicted medians are spread across
+    every band for both calib (~4000 rows) and test (~4000 rows).
+    """
+    bands = [0, 1200, 1400, 1600, 1800, 2000, 3000]
+    band_ranges = [(700, 1150), (1210, 1390), (1410, 1590), (1610, 1790), (1810, 1990), (2050, 2450)]
+    sigmas = [300.0, 20.0, 20.0, 20.0, 20.0, 300.0]     # extremes much noisier than the middle
+    n_per_band = 700
+
+    def _make(rng):
+        medians, ys, band_of = [], [], []
+        for b, ((lo, hi), sigma) in enumerate(zip(band_ranges, sigmas)):
+            med = rng.uniform(lo, hi, n_per_band)
+            medians.append(med)
+            ys.append(med + rng.normal(0, sigma, n_per_band))
+            band_of.append(np.full(n_per_band, b))
+        return np.concatenate(medians), np.concatenate(ys), np.concatenate(band_of)
+
+    rng = np.random.RandomState(0)
+    med_cal, y_cal, _ = _make(rng)
+    med_te, y_te, band_te = _make(rng)
+
+    def _raw(median):
+        return {"lower": median - 1.0, "upper": median + 1.0, "median": median}
+
+    alpha = 0.1
+    global_corr = conformal_correction(_raw(med_cal), y_cal, alpha, two_sided=False)
+    plain = apply_conformal(_raw(med_te), global_corr)
+
+    mondrian_corr = conformal_correction_by_band(_raw(med_cal), y_cal, alpha, bands, min_n=200)
+    mondrian = apply_conformal_by_band(_raw(med_te), mondrian_corr, bands)
+
+    def _cov_by_band(interval):
+        cov = []
+        for b in range(len(bands) - 1):
+            m = band_te == b
+            cov.append(float(np.mean((y_te[m] >= interval["lower"][m]) & (y_te[m] <= interval["upper"][m]))))
+        return cov
+
+    cov_plain = _cov_by_band(plain)
+    cov_mondrian = _cov_by_band(mondrian)
+
+    assert all(0.85 <= c <= 0.95 for c in cov_mondrian), cov_mondrian
+    assert any(c < 0.85 for c in cov_plain), cov_plain
+
+
+def test_apply_conformal_by_band_preserves_ordering_with_negative_correction():
+    bands = [0, 1200, 1400, 1600, 1800, 2000, 3000]
+    median = np.array([500.0, 1300.0, 2500.0])
+    # predicted_bands(median, bands) -> [0, 1, 5]
+    interval = {"lower": median - 20.0, "upper": median + 20.0, "median": median}
+    corrections = {
+        0: (-50.0, -50.0),   # exceeds the raw half-width (20) -> must clip to the median, not cross it
+        1: (10.0, 10.0),     # ordinary positive widening
+        2: (0.0, 0.0), 3: (0.0, 0.0), 4: (0.0, 0.0),
+        5: (-100.0, -100.0),  # also exceeds the raw half-width -> clips to the median
+    }
+
+    out = apply_conformal_by_band(interval, corrections, bands)
+
+    assert np.all(out["lower"] <= out["median"])
+    assert np.all(out["median"] <= out["upper"])
+    assert out["lower"][0] == pytest.approx(median[0]) and out["upper"][0] == pytest.approx(median[0])
+    assert out["lower"][1] == pytest.approx(1300.0 - 20.0 - 10.0)
+    assert out["upper"][1] == pytest.approx(1300.0 + 20.0 + 10.0)
+    assert out["lower"][2] == pytest.approx(median[2]) and out["upper"][2] == pytest.approx(median[2])
+
+
+def test_predicted_bands_matches_digitize_on_median():
+    bands = [0, 1200, 1400, 1600, 1800, 2000, 3000]
+    median = np.array([500.0, 1250.0, 2999.0])
+    assert predicted_bands(median, bands).tolist() == [0, 1, 5]

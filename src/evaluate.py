@@ -32,8 +32,10 @@ from src.model import (
     BASELINE_FEATURES,
     add_opponent_rating,
     apply_conformal,
+    apply_conformal_by_band,
     band_sample_weights,
     conformal_correction,
+    conformal_correction_by_band,
     fit_early_stopping,
     grouped_train_val_calib_test,
     make_point_model,
@@ -438,23 +440,49 @@ def run_evaluation(
         results["best_params"] = best_params
         best_model, best_pred = tuned, tuned_pred
 
-    # --- quantile interval, conformalized (split-CQR) against the held-out calib split ---
+    # --- quantile interval, conformalized against the held-out calib split ---
+    # Two intervals are always computed: plain split-CQR (one global correction) and Mondrian
+    # (band-conditional) CQR — a separate correction per PREDICTED-median band, which fixes the
+    # plain interval's tendency to under-cover the rating extremes and over-cover the middle.
+    # ``model.mondrian_cqr`` selects which one is the HEADLINE interval (coverage/width/coverage_by_band
+    # below); both are reported so the improvement is visible.
     quantiles = cfg["model"]["quantiles"]
     alpha = round(1.0 - (max(quantiles) - min(quantiles)), 10)   # e.g. [0.05,0.5,0.95] -> 0.10
     qmodels = train_quantile_models(train[full_features], y_tr, val[full_features], y_val, cfg, best_params)
 
     interval_cal = predict_interval(qmodels, calib[full_features], quantiles)
-    correction = conformal_correction(interval_cal, y_cal, alpha, cfg["model"]["cqr_two_sided"])
-
     interval_raw = predict_interval(qmodels, test[full_features], quantiles)
-    interval = apply_conformal(interval_raw, correction)
-    lo, up = interval["lower"], interval["upper"]
+
+    # plain (marginal) split-CQR — one global correction applied everywhere.
+    correction = conformal_correction(interval_cal, y_cal, alpha, cfg["model"]["cqr_two_sided"])
+    interval_plain = apply_conformal(interval_raw, correction)
+
+    # Mondrian (band-conditional) split-CQR — band assignment uses the PREDICTED median only (see
+    # conformal_correction_by_band's docstring for the true-band caveat).
+    mondrian_corrections = conformal_correction_by_band(
+        interval_cal, y_cal, alpha, bands, cfg["model"]["cqr_two_sided"], cfg["model"]["mondrian_min_calib"],
+    )
+    interval_mondrian = apply_conformal_by_band(interval_raw, mondrian_corrections, bands)
 
     results["coverage_raw"] = interval_coverage(y_te, interval_raw["lower"], interval_raw["upper"])
     results["mean_interval_width_raw"] = mean_interval_width(interval_raw["lower"], interval_raw["upper"])
+
+    results["coverage_cqr_plain"] = interval_coverage(y_te, interval_plain["lower"], interval_plain["upper"])
+    results["mean_interval_width_plain"] = mean_interval_width(interval_plain["lower"], interval_plain["upper"])
+    results["coverage_by_band_plain"] = _coverage_by_band(y_te, interval_plain["lower"], interval_plain["upper"], bands)
+
+    results["coverage_cqr_mondrian"] = interval_coverage(y_te, interval_mondrian["lower"], interval_mondrian["upper"])
+    results["mean_interval_width_mondrian"] = mean_interval_width(interval_mondrian["lower"], interval_mondrian["upper"])
+    results["coverage_by_band_mondrian"] = _coverage_by_band(y_te, interval_mondrian["lower"], interval_mondrian["upper"], bands)
+
+    results["mondrian_headline"] = bool(cfg["model"]["mondrian_cqr"])
+    headline = interval_mondrian if results["mondrian_headline"] else interval_plain
+    lo, up = headline["lower"], headline["upper"]
+
     results["coverage"] = interval_coverage(y_te, lo, up)
     results["mean_interval_width"] = mean_interval_width(lo, up)
-    results["conformal_correction"] = correction
+    results["conformal_correction"] = correction               # plain global tuple, always
+    results["mondrian_corrections"] = mondrian_corrections      # per predicted-band dict
     results["pinball"] = {a: pinball_loss(y_te, qmodels[a].predict(test[full_features]), a)
                           for a in quantiles}
     results["coverage_by_band"] = _coverage_by_band(y_te, lo, up, bands)
@@ -549,9 +577,14 @@ def _print_summary(r: dict[str, Any]) -> None:
     pp = r["per_player"]
     print(f"  per-player (all games)   : {pp['mae']:.1f} MAE over {pp['n_players']:,} players "
           f"({pp['multi_game_share']*100:.0f}% have >=2 games)")
-    print(f"  90% interval coverage    : raw {r['coverage_raw']*100:.1f}% -> CQR {r['coverage']*100:.1f}% "
-          f"(target 90); width {r['mean_interval_width_raw']:.0f} -> {r['mean_interval_width']:.0f}")
-    print("  coverage by band (CQR)   : "
+    print(f"  90% interval coverage    : raw {r['coverage_raw']*100:.1f}% -> CQR(plain) "
+          f"{r['coverage_cqr_plain']*100:.1f}% (target 90); "
+          f"width {r['mean_interval_width_raw']:.0f} -> {r['mean_interval_width_plain']:.0f}")
+    headline = "Mondrian" if r.get("mondrian_headline") else "plain"
+    print(f"  Mondrian CQR             : {r['coverage_cqr_mondrian']*100:.1f}% "
+          f"width {r['mean_interval_width_mondrian']:.0f}  [headline={headline}]; by band: "
+          + "  ".join(f"{b['band']}={b['coverage']*100:.0f}%" for b in r["coverage_by_band_mondrian"]))
+    print(f"  coverage by band (headline={headline}): "
           + "  ".join(f"{b['band']}={b['coverage']*100:.0f}%" for b in r["coverage_by_band"]))
     print(f"  band exact / adjacent    : {r['band_exact']*100:.1f}% / {r['band_adjacent']*100:.1f}%")
     if r["aggregation_curve"]:
@@ -585,11 +618,18 @@ def _append_results_md(path: str | Path, r: dict[str, Any], tuned: bool) -> None
         f"- median AE {p['median_ae']:.0f}, R² {p['r2']:.3f}, Spearman {p['spearman']:.3f}, "
         f"within 100/200 Elo {p['within_100']*100:.0f}%/{p['within_200']*100:.0f}%, bias {p['bias']:+.1f}",
         f"- per-player (all games averaged): **{pp['mae']:.1f}** MAE over {pp['n_players']} players",
-        f"- 90% interval coverage: raw {r['coverage_raw']*100:.1f}% -> CQR **{r['coverage']*100:.1f}%** "
-        f"(width {r['mean_interval_width_raw']:.0f} -> {r['mean_interval_width']:.0f} Elo; "
+        f"- 90% interval coverage: raw {r['coverage_raw']*100:.1f}% -> CQR(plain) "
+        f"**{r['coverage_cqr_plain']*100:.1f}%** "
+        f"(width {r['mean_interval_width_raw']:.0f} -> {r['mean_interval_width_plain']:.0f} Elo; "
         f"correction lo={r['conformal_correction'][0]:.1f}, hi={r['conformal_correction'][1]:.1f})",
-        "- coverage by band: " + ", ".join(
-            f"{b['band']} {b['coverage']*100:.0f}%" for b in r["coverage_by_band"]),
+        f"- Mondrian CQR: **{r['coverage_cqr_mondrian']*100:.1f}%** "
+        f"(width {r['mean_interval_width_mondrian']:.0f} Elo)"
+        f"{' — headline' if r.get('mondrian_headline') else ''}",
+        "- coverage by band (headline=" + ("mondrian" if r.get("mondrian_headline") else "plain") + "): "
+        + ", ".join(f"{b['band']} {b['coverage']*100:.0f}%" for b in r["coverage_by_band"]),
+        "- per-band coverage, plain/Mondrian: " + ", ".join(
+            f"{pb['band']} {pb['coverage']*100:.0f}%/{mb['coverage']*100:.0f}%"
+            for pb, mb in zip(r["coverage_by_band_plain"], r["coverage_by_band_mondrian"])),
         f"- band accuracy: {r['band_exact']*100:.1f}% exact, {r['band_adjacent']*100:.1f}% adjacent",
     ]
     if r["aggregation_curve"]:
