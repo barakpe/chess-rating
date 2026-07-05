@@ -73,12 +73,17 @@ def grouped_split(
 
 def make_ridge(alpha: float):
     from sklearn.compose import ColumnTransformer
+    from sklearn.impute import SimpleImputer
     from sklearn.linear_model import Ridge
     from sklearn.pipeline import Pipeline
     from sklearn.preprocessing import OneHotEncoder, StandardScaler
 
+    num_pipe = Pipeline([
+        ("impute", SimpleImputer(strategy="median")),  # future-proof: engine features can be NaN
+        ("scale", StandardScaler()),
+    ])
     pre = ColumnTransformer([
-        ("num", StandardScaler(), BASELINE_NUM),
+        ("num", num_pipe, BASELINE_NUM),
         ("cat", OneHotEncoder(handle_unknown="ignore"), BASELINE_CAT),
     ])
     return Pipeline([("pre", pre), ("ridge", Ridge(alpha=alpha))])
@@ -220,6 +225,21 @@ def grouped_train_val_test(
     return train, val, test
 
 
+def grouped_train_val_calib_test(
+    df: pd.DataFrame, cfg: dict[str, Any]
+) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame]:
+    """Grouped (by username) train/val/calib/test.
+
+    val = early stopping only. calib = conformal/recalibration only — never seen by any fit.
+    test = final report. No username appears in more than one of the four splits.
+    """
+    seed = cfg["random_seed"]
+    train_full, test = grouped_split(df, cfg["model"]["test_size"], seed)
+    train_mid, val = grouped_split(train_full, cfg["model"]["val_size"], seed + 1)
+    train, calib = grouped_split(train_mid, cfg["model"]["calib_size"], seed + 2)
+    return train, val, calib, test
+
+
 def make_point_model(cfg: dict[str, Any], params: dict[str, Any] | None = None):
     import lightgbm as lgb
 
@@ -292,6 +312,58 @@ def predict_interval(models: dict[float, Any], x, quantiles: list[float]) -> dic
     return {"lower": preds[:, 0], "median": preds[:, len(quantiles) // 2], "upper": preds[:, -1]}
 
 
+def _conformal_quantile(scores: np.ndarray, level: float) -> float:
+    """Finite-sample conformal quantile of ``scores`` at ``level`` (Romano-Patterson-Candes 2019).
+
+    k = ceil((n + 1) * level)-th smallest score; degenerate (k > n, tiny calibration sets only)
+    falls back to the max.
+    """
+    import math
+
+    scores = np.sort(np.asarray(scores, float))
+    n = len(scores)
+    k = math.ceil((n + 1) * level)
+    if k > n:
+        return float(scores[-1])  # degenerate only for tiny calibration sets
+    return float(scores[k - 1])
+
+
+def conformal_correction(
+    interval: dict[str, np.ndarray], y: np.ndarray, alpha: float, two_sided: bool = False
+) -> tuple[float, float]:
+    """Split-CQR correction (lo, hi) from a calibration-set ``interval`` (predict_interval output).
+
+    Symmetric (two_sided=False): one nonconformity score E = max(lower - y, y - upper), corrected
+    by its (1 - alpha) conformal quantile applied equally to both sides. Two-sided: separate lower/
+    upper nonconformity scores, each corrected at (1 - alpha/2). Corrections may be NEGATIVE — if the
+    raw interval over-covers on the calibration set, CQR legitimately narrows it.
+    """
+    y = np.asarray(y, float)
+    if two_sided:
+        lo_scores = interval["lower"] - y
+        hi_scores = y - interval["upper"]
+        q_lo = _conformal_quantile(lo_scores, 1 - alpha / 2)
+        q_hi = _conformal_quantile(hi_scores, 1 - alpha / 2)
+        return q_lo, q_hi
+    e = np.maximum(interval["lower"] - y, y - interval["upper"])
+    q = _conformal_quantile(e, 1 - alpha)
+    return q, q
+
+
+def apply_conformal(
+    interval: dict[str, np.ndarray], correction: tuple[float, float]
+) -> dict[str, np.ndarray]:
+    """Apply a (lo, hi) conformal correction to ``interval``; returns a NEW dict, median unchanged.
+
+    Clips so ordering survives a negative correction (over-covering raw interval narrowed by CQR).
+    """
+    lo, hi = correction
+    median = interval["median"]
+    lower = np.minimum(interval["lower"] - lo, median)
+    upper = np.maximum(interval["upper"] + hi, median)
+    return {"lower": lower, "median": median, "upper": upper}
+
+
 def tune_lgbm(x, y, groups, cfg) -> dict[str, Any]:
     """Optuna TPE search minimising grouped-CV MAE. Returns the best hyperparameters."""
     import lightgbm as lgb
@@ -311,7 +383,7 @@ def tune_lgbm(x, y, groups, cfg) -> dict[str, Any]:
             "min_child_samples": trial.suggest_int("min_child_samples", 5, 120),
             "reg_lambda": trial.suggest_float("reg_lambda", 1e-3, 10.0, log=True),
         }
-        gkf = GroupKFold(n_splits=3)
+        gkf = GroupKFold(n_splits=cfg["model"]["tune"]["cv_folds"])
         scores = []
         for tr, va in gkf.split(x, y, groups):
             model = make_point_model(cfg, params)

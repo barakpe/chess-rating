@@ -12,6 +12,7 @@ import pandas as pd  # noqa: E402
 
 from src.config import load_config  # noqa: E402
 from src.evaluate import (  # noqa: E402
+    _coverage_by_band,
     aggregation_curve,
     apply_deshrink,
     band_accuracy,
@@ -23,6 +24,7 @@ from src.evaluate import (  # noqa: E402
     pinball_loss,
     point_metrics,
     run_evaluation,
+    run_tail_study,
     to_bands,
 )
 
@@ -51,6 +53,24 @@ def test_bands_and_accuracy():
     exact, adjacent = band_accuracy(y, yhat, bands)
     assert exact == pytest.approx(1 / 3)
     assert adjacent == pytest.approx(2 / 3)
+
+
+def test_coverage_by_band():
+    bands = [0, 1200, 1400, 1600, 1800, 2000, 3000]
+    # band 0 ([0,1200)): two points, one covered, one not -> coverage 0.5
+    # band 5 ([2000,3000)): two points, both covered -> coverage 1.0
+    y = np.array([1000.0, 1100.0, 2500.0, 2600.0])
+    lo = np.array([950.0, 1150.0, 2400.0, 2550.0])   # second band-0 point falls outside [lo,up]
+    up = np.array([1050.0, 1200.0, 2600.0, 2650.0])
+    out = _coverage_by_band(y, lo, up, bands)
+    by_band = {d["band"]: d for d in out}
+    assert set(by_band.keys()) == {"0-1200", "2000-3000"}     # empty bands are omitted
+    assert by_band["0-1200"]["n"] == 2
+    assert by_band["0-1200"]["coverage"] == pytest.approx(0.5)
+    assert by_band["0-1200"]["mean_width"] == pytest.approx((100 + 50) / 2)
+    assert by_band["2000-3000"]["n"] == 2
+    assert by_band["2000-3000"]["coverage"] == pytest.approx(1.0)
+    assert by_band["2000-3000"]["mean_width"] == pytest.approx((200 + 100) / 2)
 
 
 def test_point_metrics():
@@ -107,9 +127,11 @@ def test_aggregation_curve():
     assert all(c["n_players"] == 2 for c in curve)
 
 
-def _synthetic_parquets(tmp_path, n_games=60, seed=0):
+def _synthetic_parquets(tmp_path, n_games=150, n_players=48, seed=0):
+    # enough distinct usernames that the 4-way grouped split (test/val/calib carved off train)
+    # leaves every one of the four splits non-empty.
     rng = np.random.RandomState(seed)
-    players = [f"user{i}" for i in range(24)]
+    players = [f"user{i}" for i in range(n_players)]
     ratings = {p: 900 + i * 70 for i, p in enumerate(players)}
     feat, games = [], []
     for gi in range(n_games):
@@ -144,7 +166,35 @@ def test_run_evaluation_end_to_end(tmp_path):
     r = run_evaluation(cfg, fp, gp, tune=False, make_figures=False, results_md=None)
 
     assert np.isfinite(r["baseline_mae"]) and np.isfinite(r["full_mae"])
+    assert r["n_calib"] > 0
+    assert 0.0 <= r["coverage_raw"] <= 1.0
     assert 0.0 <= r["coverage"] <= 1.0
+    assert len(r["conformal_correction"]) == 2
+    assert all(np.isfinite(v) for v in r["conformal_correction"])
+    assert r["coverage_by_band"]                       # non-empty
+    for b in r["coverage_by_band"]:
+        assert set(b.keys()) == {"band", "n", "coverage", "mean_width"}
+        assert b["n"] > 0
+        assert 0.0 <= b["coverage"] <= 1.0
     assert 0.0 <= r["band_exact"] <= 1.0 and r["band_adjacent"] >= r["band_exact"]
     assert len(r["ablations"]) >= 1
     assert set(cfg["model"]["quantiles"]) == set(r["pinball"].keys())
+
+
+def test_run_tail_study_smoke(tmp_path):
+    cfg = load_config()
+    cfg["model"]["lgbm"]["n_estimators"] = 30  # keep training fast
+    fp, gp = _synthetic_parquets(tmp_path)
+    results_md = tmp_path / "results.md"
+
+    variants = run_tail_study(cfg, fp, gp, results_md=results_md)
+
+    assert len(variants) == 3
+    for tbl in variants.values():
+        assert np.isfinite(tbl["overall"])
+        assert "tail" in tbl and "mid" in tbl
+
+    text = results_md.read_text(encoding="utf-8")
+    assert "tail study" in text
+    for name in variants:
+        assert name in text

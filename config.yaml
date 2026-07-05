@@ -12,6 +12,10 @@ use_stored_evals: true           # Option A — only keep games that already car
 sample_size: 300000              # bump up on a stronger machine
 max_games_scanned: null          # cap the raw stream for fast prototyping (null = whole file)
 random_seed: 42                  # fix everywhere for reproducibility
+player_cohort:                   # ALSO keep every game of a hash-sampled player subset (separate
+  enabled: true                  # parquet) so the aggregation curve gets players with many games
+  hash_rate: 0.005               # P(username in cohort) via a stable hash of the username
+  max_games: 100000              # safety cap on cohort rows held in memory
 
 # --- Cleaning / filtering ---
 min_plies: 10                    # drop aborted / ultra-short games
@@ -53,9 +57,11 @@ features:
 model:
   test_size: 0.2                 # grouped hold-out fraction (split by username, never by game)
   val_size: 0.2                  # grouped validation fraction (carved from train) for early stopping
+  calib_size: 0.15               # grouped conformal-calibration fraction (carved from train after val)
   ridge_alpha: 10.0
   early_stopping_rounds: 50
   quantiles: [0.05, 0.5, 0.95]   # lower / median / upper -> a 90% prediction interval
+  cqr_two_sided: false           # CQR: one symmetric correction (false) or per-side alpha/2 (true)
   balance_strength: 0.5          # tail reweighting exponent (0=uniform, 1=full inverse-frequency)
   lgbm:
     n_estimators: 3000           # upper bound; early stopping picks the real count
@@ -64,10 +70,10 @@ model:
   tune:
     enabled: false               # Optuna hyperparameter search (opt-in via --tune)
     n_trials: 25
+    cv_folds: 3                  # GroupKFold folds inside the Optuna objective
 
 # --- Evaluation & error analysis (Stages 7-8) ---
 evaluate:
-  cv_folds: 5                    # GroupKFold folds (by username)
   aggregation_k: [1, 2, 3, 5, 10, 20]      # games-per-player for the aggregation curve
   aggregation_min_players: 30    # only report a K if >= this many players have >= K test games
   calibration_bins: 10
@@ -85,3 +91,4 @@ outputs:
   games_clean: data/processed/games_clean.parquet     # Stage 2 (clean/dedup)
   instances: data/processed/instances.parquet         # Stage 3 (2 rows/game, per-player labels)
   features: data/processed/features.parquet           # Stage 4 (per-player feature vectors)
+  player_cohort: data/processed/player_cohort.parquet # Stage 1b (player-cohort sample; aggregation curve)
