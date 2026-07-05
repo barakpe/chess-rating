@@ -62,7 +62,8 @@ parallel against the interface (not by reading each other's code).
 
 **Stage 6 (`src/evaluate.py`)** trains the improved model on the full engine+clock features and reports
 the improvement table (no-engine baseline → +engine → tuned), the **90% prediction interval** from
-three quantile LightGBMs (empirical coverage + pinball loss), rating-band accuracy + confusion matrix,
+three quantile LightGBMs **conformalized via split CQR** on a dedicated grouped calibration split
+(raw and conformalized coverage + width, per-band coverage, pinball loss), rating-band accuracy + confusion matrix,
 the **aggregation curve** (MAE vs games-per-player — single-game noise vs precision by averaging),
 calibration, and **SHAP** importances. Stage 8 adds error analysis (largest residuals, residual by band
 & game length) and **feature-group ablations**. Everything is split by `username` (never by game).
@@ -133,7 +134,7 @@ split train/test by `username` (GroupKFold / grouped hold-out), never by game.
 ## `features.parquet` (Stage 4)
 
 `src/features.py` parses each game once and emits **one row per instance** (`game_id, color,
-username, rating, result, time_control, eco, opening` + ~60 numeric features). Built on the verified
+username, rating, result, time_control, eco, opening` + 66 numeric features). Built on the verified
 `win_percent`/`accuracy_percent`/`classify_move` primitives; every quality feature is computed
 overall **and** per phase (`opening_` / `middlegame_` / `endgame_`). Feature groups:
 
@@ -143,6 +144,15 @@ overall **and** per phase (`opening_` / `middlegame_` / `endgame_`). Feature gro
 - **Time:** `move_time_{mean,std,median}` from `[%clk]` deltas, `fast_move_share`, `time_trouble_share`.
 - **Style:** `game_plies`, `player_moves`, `n_captures`, `n_checks`, `reached_winning`,
   `converted_winning` (did they win from a winning position?).
+- **Presence flags:** `has_opening`, `has_middlegame`, `has_endgame`, `has_clock` (0/1).
+
+**Missing-value contract:** NaN means *not observable*, 0 is reserved for a true zero (exposure
+counts like `{phase}_n_moves`/`n_timed_moves`, or a genuinely computed zero). A phase with no
+moves gets `n_moves = 0` and NaN for **all** its other aggregates (including the error counts —
+a count is only meaningful conditional on exposure); `*_std` is NaN below 2 observations; all
+clock features are NaN when a game carries no `[%clk]`. LightGBM consumes NaN natively (learns a
+default split direction) — no sentinel values or imputation, and the flags make absence directly
+splittable. ~38% of instances have no endgame block, ~8% no middlegame.
 
 Same leakage guarantee: the eval before/after a move is taken from *this* player's POV only; no
 opponent-derived quantity enters a feature. Cross-game aggregates (opening-diversity entropy, the
@@ -195,8 +205,16 @@ must run top-to-bottom (Restart & Run All) before they're considered done.
   levers are **aggregation** (more games per player) and **better tail-discriminating features**.
 - **Aggregation-curve cohort:** a uniform *game* sample has few players with many games, so each K in
   the aggregation curve is a different, shrinking cohort (higher-K points are noisier and not
-  apples-to-apples). Backlog: a player-stratified sample (pick players, take all their games) would
-  give a cleaner, monotone curve.
-- **Interval calibration:** the raw 90% quantile interval under-covers (~85% empirically); backlog is
-  conformalized quantile regression (CQR) to recalibrate width for guaranteed marginal coverage.
+  apples-to-apples). `ingest.py` now also writes a **player-cohort sample**
+  (`player_cohort` in config: all games of a small hash-sampled player subset →
+  `data/processed/player_cohort.parquet`) so the curve can be computed on complete per-player
+  game sets once the large-sample run lands.
+- **Interval calibration — resolved by CQR, with a conditional-coverage caveat.** The raw 90%
+  quantile interval under-covers (~85%). We now apply split conformalized quantile regression
+  (CQR): a dedicated grouped **calibration split** (never seen by any fit; see `model.calib_size`)
+  supplies a finite-sample correction that widens/narrows the interval for guaranteed *marginal*
+  coverage (measured: raw 84.6% → CQR 90.8%). The guarantee is marginal only: per-band coverage
+  still dips at the extremes (~75% at 0–1200, ~82% at 2000+) because interval width barely adapts
+  across bands (see `reports/figures/interval_by_band.png`). Backlog: band-conditional (Mondrian)
+  CQR for per-band guarantees.
 - **Scope:** blitz only; results may not transfer to rapid/classical.

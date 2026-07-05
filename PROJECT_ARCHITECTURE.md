@@ -161,7 +161,9 @@ strong, to justify excluding it).
 **Stage 6 — Improved model (`src/model.py`).** Add the engine/clock features. Tune
 LightGBM (Optuna, early stopping on a validation fold). Then train **quantile regressors**
 (LightGBM `objective=quantile`, alpha = 0.05 / 0.5 / 0.95) to produce a **median + 90%
-interval per prediction** — the "1500 ± X" with X earned per game. Derive rating bands by
+interval per prediction** — the "1500 ± X" with X earned per game. The raw interval is
+**conformalized (split CQR)** on a dedicated grouped calibration split (never seen by any
+fit) so the 90% marginal coverage is guaranteed, not hoped for. Derive rating bands by
 bucketing the median for the confusion matrix.
 
 **Stage 7 — Evaluation (`src/evaluate.py`).**

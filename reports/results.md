@@ -44,3 +44,56 @@ n_train=37802, n_test=11753, n_features=65
 - band accuracy: 35.4% exact, 75.6% adjacent
 - aggregation MAE: K1=236, K2=213, K3=221, K5=220, K10=222
 - ablation (MAE↑ when dropped): engine +31.4, style +10.9, clock +8.1, opening +7.6
+
+## 2026-07-05 17:31 — improved model
+n_train=32033, n_calib=5769, n_test=11753, n_features=69
+
+| stage | MAE | RMSE |
+|---|---|---|
+| no-engine baseline | 290.2 | — |
+| + engine/clock | 243.2 | 306.2 |
+
+- median AE 204, R² 0.526, Spearman 0.715, within 100/200 Elo 26%/49%, bias +7.5
+- per-player (all games averaged): **229.3** MAE over 7298 players
+- 90% interval coverage: raw 84.6% -> CQR **90.8%** (width 950 -> 1098 Elo; correction lo=74.1, hi=74.1)
+- coverage by band: 0-1200 75%, 1200-1400 98%, 1400-1600 99%, 1600-1800 100%, 1800-2000 98%, 2000-3000 82%
+- band accuracy: 35.2% exact, 75.0% adjacent
+- aggregation MAE: K1=238, K2=217, K3=225, K5=226, K10=233
+- ablation (MAE↑ when dropped): engine +31.5, style +10.0, clock +7.6, opening +6.6
+
+## 2026-07-05 17:31 — tail study
+
+| variant | overall | tail | mid | 0-1200 | 1200-1400 | 1400-1600 | 1600-1800 | 1800-2000 | 2000-3000 |
+|---|---|---|---|---|---|---|---|---|---|
+| plain | 243.2 | 319 | 194 | 352 | 209 | 182 | 177 | 207 | 287 |
+| reweighted(s=0.5) | 244.2 | 326 | 191 | 348 | 201 | 175 | 175 | 211 | 303 |
+| deshrink(slope=1.06) | 243.2 | 309 | 201 | 345 | 214 | 192 | 185 | 212 | 274 |
+
+## 2026-07-05 — missing-value encoding A/B (same grouped splits, untuned)
+Old encoding (65 feats: absent-phase counts=0, stds=0 at n=1, time_trouble_share=0 with no clock)
+vs new unified NaN contract + has_* flags (69 feats). Identical usernames/seed => identical splits.
+
+| encoding | MAE | RMSE | R2 | raw coverage | CQR coverage |
+|---|---|---|---|---|---|
+| old (mixed 0/NaN) | 242.7 | 305.6 | 0.528 | 84.7% | 90.8% |
+| new (NaN contract + flags) | 243.2 | 306.2 | 0.526 | 84.6% | 90.8% |
+
+Verdict: performance-neutral (dMAE +0.5, within split noise) - adopted for correctness:
+"no endgame existed" is no longer encoded as "0 endgame errors", and absence is explicitly
+splittable via has_middlegame/has_endgame/has_clock. CQR coverage is robust to either encoding.
+
+## 2026-07-05 21:43 — improved model
+n_train=329353, n_calib=59124, n_test=120513, n_features=69
+
+| stage | MAE | RMSE |
+|---|---|---|
+| no-engine baseline | 293.4 | — |
+| + engine/clock | 239.4 | 300.4 |
+
+- median AE 202, R² 0.544, Spearman 0.726, within 100/200 Elo 26%/50%, bias -3.3
+- per-player (all games averaged): **218.4** MAE over 50357 players
+- 90% interval coverage: raw 87.5% -> CQR **89.8%** (width 945 -> 998 Elo; correction lo=26.6, hi=26.6)
+- coverage by band: 0-1200 78%, 1200-1400 95%, 1400-1600 98%, 1600-1800 99%, 1800-2000 95%, 2000-3000 80%
+- band accuracy: 36.5% exact, 75.9% adjacent
+- aggregation MAE: K1=235, K2=209, K3=202, K5=200, K10=203, K20=218
+- ablation (MAE↑ when dropped): engine +33.8, clock +9.8, style +8.1, opening +8.0
