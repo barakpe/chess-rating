@@ -1,6 +1,7 @@
 """Stage 4 tests: extract_player_features on the fixture keep game (hand-verified values),
 plus an end-to-end build_features run (which exercises headerless movetext parsing)."""
 
+import io
 import math
 from pathlib import Path
 
@@ -60,6 +61,65 @@ def test_extract_black_basic():
     assert b["n_moves"] == 7
     assert b["blunder_count"] == 0
     assert b["opening_n_moves"] == 7
+
+
+def test_absent_phase_contract():
+    """The keep game is 14 plies, entirely inside the opening boundary (30): middlegame and
+    endgame never happened. n_moves must be a true 0 (a real exposure measure); every other
+    per-phase aggregate must be NaN ("not observable"), not a misleading 0."""
+    cfg = load_config()
+    w = extract_player_features(_keep_game(), chess.WHITE, cfg, increment=0, base_seconds=300)
+
+    for prefix in ("middlegame_", "endgame_"):
+        assert w[f"{prefix}n_moves"] == 0
+        for stat in (
+            "cpl_mean", "cpl_median", "cpl_std", "cpl_max", "acc_mean",
+            "inaccuracy_count", "mistake_count", "blunder_count",
+            "inaccuracy_rate", "mistake_rate", "blunder_rate",
+        ):
+            assert math.isnan(w[f"{prefix}{stat}"]), f"{prefix}{stat} should be NaN, got {w[f'{prefix}{stat}']}"
+
+    assert w["has_opening"] == 1
+    assert w["has_middlegame"] == 0
+    assert w["has_endgame"] == 0
+
+
+def test_missing_clock_game():
+    """A game with [%eval] but no [%clk] anywhere: every time-derived feature is NaN (not 0),
+    since 0 timed moves means "unobserved", not "instant"/"never in time trouble"."""
+    pgn = (
+        '[Event "Test"]\n[White "a"]\n[Black "b"]\n[Result "*"]\n\n'
+        "1. e4 { [%eval 0.20] } 1... e5 { [%eval 0.18] } "
+        "2. Nf3 { [%eval 0.22] } 2... Nc6 { [%eval 0.19] } *\n"
+    )
+    game = chess.pgn.read_game(io.StringIO(pgn))
+    cfg = load_config()
+    w = extract_player_features(game, chess.WHITE, cfg, increment=0, base_seconds=300)
+
+    assert w["n_timed_moves"] == 0
+    assert w["has_clock"] == 0
+    for feat in ("move_time_mean", "move_time_std", "move_time_median", "fast_move_share", "time_trouble_share"):
+        assert math.isnan(w[feat]), f"{feat} should be NaN, got {w[feat]}"
+
+
+def test_single_quality_record_cpl_std_nan():
+    """Exactly one eval'd move for the player -> cpl_std is NaN (undefined), not 0.0
+    (0.0 would misleadingly read as 'one move, perfectly consistent')."""
+    pgn = '[Event "Test"]\n[White "a"]\n[Black "b"]\n[Result "*"]\n\n1. e4 { [%eval 0.20] } *\n'
+    game = chess.pgn.read_game(io.StringIO(pgn))
+    cfg = load_config()
+    w = extract_player_features(game, chess.WHITE, cfg, increment=0, base_seconds=300)
+
+    assert w["n_moves"] == 1
+    assert math.isnan(w["cpl_std"])
+
+
+def test_acc_after_book_nan_when_game_never_leaves_opening():
+    """The keep game (14 plies) never passes opening_max_ply (30), so acc_after_book -
+    computed only over plies past the opening boundary - is undefined."""
+    cfg = load_config()
+    w = extract_player_features(_keep_game(), chess.WHITE, cfg, increment=0, base_seconds=300)
+    assert math.isnan(w["acc_after_book"])
 
 
 def _games_clean_from_keep():

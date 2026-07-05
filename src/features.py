@@ -163,7 +163,13 @@ def _white_cp(pov_score: Any, clamp: int) -> int | None:
 
 
 def _agg(records: list[dict[str, Any]], prefix: str) -> dict[str, float]:
-    """Aggregate a list of per-move quality records into a flat feature dict."""
+    """Aggregate a list of per-move quality records into a flat feature dict.
+
+    NaN contract: phase absent (``n == 0``) -> ``n_moves`` is 0 (a true exposure measure, always
+    defined) while every other aggregate is NaN ("not observable"), including the counts (a count
+    is only meaningful conditional on exposure). ``cpl_std`` is additionally NaN for ``n == 1``
+    (std is undefined for a single observation, not "perfectly consistent").
+    """
     n = len(records)
     cpls = [r["cpl"] for r in records]
     accs = [r["accuracy"] for r in records]
@@ -174,12 +180,12 @@ def _agg(records: list[dict[str, Any]], prefix: str) -> dict[str, float]:
         f"{prefix}n_moves": n,
         f"{prefix}cpl_mean": statistics.fmean(cpls) if cpls else _NAN,
         f"{prefix}cpl_median": statistics.median(cpls) if cpls else _NAN,
-        f"{prefix}cpl_std": statistics.pstdev(cpls) if len(cpls) > 1 else (0.0 if cpls else _NAN),
+        f"{prefix}cpl_std": statistics.pstdev(cpls) if len(cpls) > 1 else _NAN,
         f"{prefix}cpl_max": max(cpls) if cpls else _NAN,
         f"{prefix}acc_mean": statistics.fmean(accs) if accs else _NAN,
-        f"{prefix}inaccuracy_count": inacc,
-        f"{prefix}mistake_count": mist,
-        f"{prefix}blunder_count": blun,
+        f"{prefix}inaccuracy_count": inacc if n else _NAN,
+        f"{prefix}mistake_count": mist if n else _NAN,
+        f"{prefix}blunder_count": blun if n else _NAN,
         f"{prefix}inaccuracy_rate": inacc / n if n else _NAN,
         f"{prefix}mistake_rate": mist / n if n else _NAN,
         f"{prefix}blunder_rate": blun / n if n else _NAN,
@@ -216,6 +222,12 @@ def extract_player_features(
     for a move is the previous ply's eval (the first uses ``cfg['eval']['start_cp']``), flipped to
     the mover's POV; ``win_after`` is this ply's eval flipped to the mover's POV. Move-quality is
     computed only for plies that carry an eval; time/style over all of the player's moves.
+
+    NaN contract: an unobserved quantity is NaN, not 0 — 0 is reserved for a true zero-exposure
+    count (``n_moves``, ``n_timed_moves``) or a genuinely-computed zero. ``move_time_std`` is NaN
+    for fewer than 2 timed moves; ``time_trouble_share`` is NaN with no timed moves at all. Four
+    flags (``has_opening``, ``has_middlegame``, ``has_endgame``, ``has_clock``) make phase/clock
+    absence directly splittable instead of relying on trees inferring it from the NaNs.
     """
     eval_cfg = cfg["eval"]
     clamp = eval_cfg["cp_clamp"]
@@ -284,19 +296,23 @@ def extract_player_features(
     for phase in _PHASES:
         feats.update(_agg([r for r in quality if r["phase"] == phase], f"{phase}_"))
 
+    feats["has_opening"] = int(feats["opening_n_moves"] > 0)
+    feats["has_middlegame"] = int(feats["middlegame_n_moves"] > 0)
+    feats["has_endgame"] = int(feats["endgame_n_moves"] > 0)
+    feats["has_clock"] = int(len(move_times) > 0)
+
     after_book = [r["accuracy"] for r in quality if r["ply"] > opening_max_ply]
     feats["acc_after_book"] = statistics.fmean(after_book) if after_book else _NAN
 
     feats["move_time_mean"] = statistics.fmean(move_times) if move_times else _NAN
-    feats["move_time_std"] = (
-        statistics.pstdev(move_times) if len(move_times) > 1 else (0.0 if move_times else _NAN)
-    )
+    feats["move_time_std"] = statistics.pstdev(move_times) if len(move_times) > 1 else _NAN
     feats["move_time_median"] = statistics.median(move_times) if move_times else _NAN
     feats["n_timed_moves"] = len(move_times)
     feats["fast_move_share"] = (
         sum(t < fast_move_seconds for t in move_times) / len(move_times) if move_times else _NAN
     )
-    feats["time_trouble_share"] = n_time_trouble / n_player_moves if n_player_moves else _NAN
+    # No timed moves at all -> undefined, not 0 (0 would misleadingly read as "never in time trouble").
+    feats["time_trouble_share"] = n_time_trouble / n_player_moves if move_times else _NAN
 
     feats["game_plies"] = board.ply()
     feats["player_moves"] = n_player_moves
