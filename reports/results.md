@@ -132,3 +132,24 @@ n_train=329353, n_calib=59124, n_test=120513, n_features=77
 - band accuracy: 36.4% exact, 75.9% adjacent
 - aggregation MAE: K1=235, K2=209, K3=202, K5=200, K10=203, K20=217
 - ablation (MAE↑ when dropped): engine +33.6, clock +9.1, opening +8.2, style +7.9
+
+## 2026-07-07 00:11 — improved model (tuned)
+n_train=329353, n_calib=59124, n_test=120513, n_features=77
+
+| stage | MAE | RMSE |
+|---|---|---|
+| no-engine baseline | 293.4 | — |
+| + engine/clock | 239.1 | 300.1 |
+| + tuned | 237.2 | 297.7 |
+
+- best_params: `{'num_leaves': 178, 'learning_rate': 0.010507258889041039, 'feature_fraction': 0.5034331983772904, 'bagging_fraction': 0.8786594745277075, 'bagging_freq': 1, 'min_child_samples': 112, 'reg_lambda': 0.9635897279825012}`
+
+- median AE 200, R² 0.553, Spearman 0.731, within 100/200 Elo 26%/50%, bias -3.0
+- per-player (all games averaged): **216.7** MAE over 50357 players
+- 90% interval coverage: raw 87.0% -> CQR(plain) **89.7%** (width 929 -> 991 Elo; correction lo=31.1, hi=31.1)
+- Mondrian CQR: **89.8%** (width 992 Elo) — headline
+- coverage by band (headline=mondrian): 0-1200 77%, 1200-1400 96%, 1400-1600 98%, 1600-1800 98%, 1800-2000 95%, 2000-3000 81%
+- per-band coverage, plain/Mondrian: 0-1200 78%/77%, 1200-1400 95%/96%, 1400-1600 98%/98%, 1600-1800 98%/98%, 1800-2000 95%/95%, 2000-3000 80%/81%
+- band accuracy: 36.6% exact, 76.2% adjacent
+- aggregation MAE: K1=233, K2=208, K3=201, K5=198, K10=201, K20=216
+- ablation (MAE↑ when dropped): engine +33.6, clock +9.1, opening +8.2, style +7.9
