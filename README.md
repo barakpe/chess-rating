@@ -8,7 +8,9 @@ cheating detection are stretch goals.
 
 See [`PROJECT_ARCHITECTURE.md`](PROJECT_ARCHITECTURE.md) for the full design rationale. This
 README is the operational contract: how to set up, what to run in what order, the data interface
-between stages, and the conventions the codebase follows.
+between stages, and the conventions the codebase follows. For how our accuracy compares to the
+theoretical Elo noise floor (~160 MAE single-game) and the deep-learning state of the art (RatingNet,
+2024), see [`reports/BENCHMARKS.md`](reports/BENCHMARKS.md).
 
 ---
 
