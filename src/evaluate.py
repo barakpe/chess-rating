@@ -30,18 +30,21 @@ import pandas as pd
 
 from src.model import (
     BASELINE_FEATURES,
+    _append_md,
     add_opponent_rating,
     apply_conformal,
     apply_conformal_by_band,
     band_sample_weights,
     conformal_correction,
     conformal_correction_by_band,
+    current_commit_hash,
     fit_early_stopping,
     grouped_train_val_calib_test,
     make_point_model,
     predict_interval,
     prepare_features,
     split_feature_columns,
+    to_bands,
     train_quantile_models,
     tune_lgbm,
 )
@@ -64,12 +67,6 @@ def pinball_loss(y: np.ndarray, pred: np.ndarray, alpha: float) -> float:
     y, pred = np.asarray(y, float), np.asarray(pred, float)
     err = y - pred
     return float(np.mean(np.maximum(alpha * err, (alpha - 1.0) * err)))
-
-
-def to_bands(values: np.ndarray, bands: list[int]) -> np.ndarray:
-    """Bucket ratings into band indices 0..len(bands)-2 using the config edges."""
-    # bands like [0,1200,...,3000]; interior edges define the buckets.
-    return np.digitize(np.asarray(values, float), bands[1:-1], right=False)
 
 
 def band_accuracy(y_true: np.ndarray, y_pred: np.ndarray, bands: list[int]) -> tuple[float, float]:
@@ -205,12 +202,10 @@ def _print_tail_study(variants: dict[str, dict[str, float]], bands: list[int]) -
 
 
 def _append_tail_study_md(path: str | Path, variants: dict[str, dict[str, float]], bands: list[int]) -> None:
-    from datetime import datetime
-
     band_cols = [f"{bands[b]}-{bands[b+1]}" for b in range(len(bands) - 1)]
     header = ["variant", "overall", "tail", "mid"] + band_cols
     lines = [
-        f"\n## {datetime.now():%Y-%m-%d %H:%M} — tail study",
+        f"\n## {current_commit_hash()} — tail study",
         "",
         "| " + " | ".join(header) + " |",
         "|" + "---|" * len(header),
@@ -219,9 +214,7 @@ def _append_tail_study_md(path: str | Path, variants: dict[str, dict[str, float]
         row = [name, f"{tbl['overall']:.1f}", f"{tbl['tail']:.0f}", f"{tbl['mid']:.0f}"]
         row += [f"{tbl[c]:.0f}" for c in band_cols]
         lines.append("| " + " | ".join(row) + " |")
-    Path(path).parent.mkdir(parents=True, exist_ok=True)
-    with open(path, "a", encoding="utf-8") as fh:
-        fh.write("\n".join(lines) + "\n")
+    _append_md(path, lines)
 
 
 def per_player_metrics(test_df: pd.DataFrame) -> dict[str, float]:
@@ -461,6 +454,7 @@ def run_evaluation(
     # conformal_correction_by_band's docstring for the true-band caveat).
     mondrian_corrections = conformal_correction_by_band(
         interval_cal, y_cal, alpha, bands, cfg["model"]["cqr_two_sided"], cfg["model"]["mondrian_min_calib"],
+        global_correction=correction,
     )
     interval_mondrian = apply_conformal_by_band(interval_raw, mondrian_corrections, bands)
 
@@ -485,7 +479,9 @@ def run_evaluation(
     results["mondrian_corrections"] = mondrian_corrections      # per predicted-band dict
     results["pinball"] = {a: pinball_loss(y_te, qmodels[a].predict(test[full_features]), a)
                           for a in quantiles}
-    results["coverage_by_band"] = _coverage_by_band(y_te, lo, up, bands)
+    results["coverage_by_band"] = (
+        results["coverage_by_band_mondrian"] if results["mondrian_headline"] else results["coverage_by_band_plain"]
+    )
 
     # --- fuller point metrics + band accuracy + confusion ---
     results["point"] = point_metrics(y_te, best_pred)
@@ -599,10 +595,8 @@ def _print_summary(r: dict[str, Any]) -> None:
 
 
 def _append_results_md(path: str | Path, r: dict[str, Any], tuned: bool) -> None:
-    from datetime import datetime
-
     lines = [
-        f"\n## {datetime.now():%Y-%m-%d %H:%M} — improved model{' (tuned)' if tuned else ''}",
+        f"\n## {current_commit_hash()} — improved model{' (tuned)' if tuned else ''}",
         f"n_train={r['n_train']}, n_calib={r['n_calib']}, n_test={r['n_test']}, n_features={r['n_features']}",
         "",
         "| stage | MAE | RMSE |",
@@ -640,9 +634,7 @@ def _append_results_md(path: str | Path, r: dict[str, Any], tuned: bool) -> None
         lines.append(f"- aggregation MAE: {curve}")
     lines.append("- ablation (MAE↑ when dropped): "
                  + ", ".join(f"{a['group']} +{a['mae_increase']:.1f}" for a in r["ablations"]))
-    Path(path).parent.mkdir(parents=True, exist_ok=True)
-    with open(path, "a", encoding="utf-8") as fh:
-        fh.write("\n".join(lines) + "\n")
+    _append_md(path, lines)
 
 
 def main() -> None:
@@ -656,7 +648,10 @@ def main() -> None:
     parser.add_argument("--no-figures", action="store_true", help="skip figure generation")
     parser.add_argument("--tail-study", action="store_true",
                         help="only compare tail-bias corrections (plain vs reweighted vs de-shrink)")
-    parser.add_argument("--results-md", default=str(Path(cfg["paths"]["figures"]).parent / "results.md"))
+    parser.add_argument(
+        "--results-md", default=str(Path(cfg["paths"]["figures"]).parent / "results.md"),
+        help="path to append a run summary to (applies to --tail-study too); pass \"\" to skip logging",
+    )
     args = parser.parse_args()
 
     for label, path in (("features", args.features), ("games_clean", args.games)):

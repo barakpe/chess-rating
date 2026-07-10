@@ -79,7 +79,7 @@ def make_ridge(alpha: float):
     from sklearn.preprocessing import OneHotEncoder, StandardScaler
 
     num_pipe = Pipeline([
-        ("impute", SimpleImputer(strategy="median")),  # future-proof: engine features can be NaN
+        ("impute", SimpleImputer(strategy="median")),  # tolerate a stray NaN in a numeric feature
         ("scale", StandardScaler()),
     ])
     pre = ColumnTransformer([
@@ -168,12 +168,36 @@ def _print_results(results: dict[str, dict[str, float]]) -> None:
             print(f"  {name:<16}{results[name]['mae']:>10.1f}{results[name]['rmse']:>10.1f}")
 
 
-def _append_results_md(path: str | Path, results: dict[str, dict[str, float]]) -> None:
-    from datetime import datetime
+_REPO_ROOT = Path(__file__).resolve().parent.parent
 
+
+def current_commit_hash() -> str:
+    """Short hash of the checked-out commit, for stamping results.md entries so a run can always
+    be traced back to the exact code that produced it. ``"unknown"`` outside a git checkout.
+    """
+    import subprocess
+
+    try:
+        out = subprocess.run(
+            ["git", "rev-parse", "--short", "HEAD"], cwd=_REPO_ROOT,
+            capture_output=True, text=True, check=True,
+        )
+        return out.stdout.strip()
+    except Exception:
+        return "unknown"
+
+
+def _append_md(path: str | Path, lines: list[str]) -> None:
+    """Append a markdown block (a results.md run entry) to ``path``, creating dirs as needed."""
+    Path(path).parent.mkdir(parents=True, exist_ok=True)
+    with open(path, "a", encoding="utf-8") as fh:
+        fh.write("\n".join(lines) + "\n")
+
+
+def _append_results_md(path: str | Path, results: dict[str, dict[str, float]]) -> None:
     meta = results.get("_meta", {})
     lines = [
-        f"\n## {datetime.now():%Y-%m-%d %H:%M} — baseline (no-engine features)",
+        f"\n## {current_commit_hash()} — baseline (no-engine features)",
         f"n_train={int(meta.get('n_train', 0))}, n_test={int(meta.get('n_test', 0))}, "
         f"features={', '.join(BASELINE_FEATURES)}",
         "",
@@ -182,9 +206,7 @@ def _append_results_md(path: str | Path, results: dict[str, dict[str, float]]) -
     ]
     lines += [f"| {n} | {results[n]['mae']:.1f} | {results[n]['rmse']:.1f} |"
               for n in _ORDER if n in results]
-    Path(path).parent.mkdir(parents=True, exist_ok=True)
-    with open(path, "a", encoding="utf-8") as fh:
-        fh.write("\n".join(lines) + "\n")
+    _append_md(path, lines)
 
 
 # =======================================================================================
@@ -213,16 +235,6 @@ def prepare_features(df: pd.DataFrame, cat_cols: list[str]) -> pd.DataFrame:
     for col in cat_cols:
         df[col] = df[col].astype("category")
     return df
-
-
-def grouped_train_val_test(
-    df: pd.DataFrame, cfg: dict[str, Any]
-) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
-    """Grouped (by username) train/val/test — val is carved from train for early stopping."""
-    seed = cfg["random_seed"]
-    train_full, test = grouped_split(df, cfg["model"]["test_size"], seed)
-    train, val = grouped_split(train_full, cfg["model"]["val_size"], seed + 1)
-    return train, val, test
 
 
 def grouped_train_val_calib_test(
@@ -287,7 +299,7 @@ def band_sample_weights(ratings: np.ndarray, bands: list[int], strength: float =
     centre. Weighting each instance by ``(1 / band_frequency) ** strength`` makes the model value
     the tails more, trading a little central accuracy for less tail bias. ``strength=0`` -> uniform.
     """
-    idx = np.digitize(np.asarray(ratings, float), bands[1:-1])
+    idx = to_bands(ratings, bands)
     counts = np.bincount(idx, minlength=len(bands) - 1).astype(float)
     counts[counts == 0] = 1.0
     freq = counts[idx] / counts.sum()
@@ -322,6 +334,8 @@ def _conformal_quantile(scores: np.ndarray, level: float) -> float:
 
     scores = np.sort(np.asarray(scores, float))
     n = len(scores)
+    if n == 0:
+        raise ValueError("conformal calibration requires a non-empty calibration set")
     k = math.ceil((n + 1) * level)
     if k > n:
         return float(scores[-1])  # degenerate only for tiny calibration sets
@@ -364,18 +378,21 @@ def apply_conformal(
     return {"lower": lower, "median": median, "upper": upper}
 
 
-def predicted_bands(median: np.ndarray, bands: list[int]) -> np.ndarray:
-    """Band index (0..len(bands)-2) for each row from its PREDICTED median — test-time legal.
+def to_bands(values: np.ndarray, bands: list[int]) -> np.ndarray:
+    """Bucket values into band indices 0..len(bands)-2 using the config edges."""
+    return np.digitize(np.asarray(values, float), bands[1:-1], right=False)
 
-    Mirrors ``evaluate.to_bands`` but lives here so Mondrian CQR doesn't require model.py to import
-    from evaluate.py (the dependency must only run the other way).
+
+def predicted_bands(median: np.ndarray, bands: list[int]) -> np.ndarray:
+    """Band index for each row from its PREDICTED median — test-time legal (see
+    ``conformal_correction_by_band``'s true-band caveat below).
     """
-    return np.digitize(np.asarray(median, float), bands[1:-1])
+    return to_bands(median, bands)
 
 
 def conformal_correction_by_band(
     interval: dict[str, np.ndarray], y: np.ndarray, alpha: float, bands: list[int],
-    two_sided: bool = False, min_n: int = 200,
+    two_sided: bool = False, min_n: int = 200, global_correction: tuple[float, float] | None = None,
 ) -> dict[int, tuple[float, float]]:
     """Mondrian (band-conditional) split-CQR: one correction per PREDICTED-median band.
 
@@ -384,6 +401,8 @@ def conformal_correction_by_band(
     have at inference). A band with fewer than ``min_n`` calibration rows falls back to the pooled
     global correction (too few nonconformity scores to estimate a stable per-band quantile). Returns
     a correction for EVERY band index 0..len(bands)-2, so callers never need a fallback of their own.
+    Pass ``global_correction`` if the caller already computed the plain/pooled correction, to avoid
+    redoing that sort-and-quantile work.
 
     CAVEAT: because banding is by PREDICTED median and the point model shrinks predictions toward the
     mean, games whose TRUE rating sits in an extreme band often have a predicted median that lands in
@@ -392,7 +411,8 @@ def conformal_correction_by_band(
     """
     y = np.asarray(y, float)
     band_idx = predicted_bands(interval["median"], bands)
-    global_correction = conformal_correction(interval, y, alpha, two_sided)
+    if global_correction is None:
+        global_correction = conformal_correction(interval, y, alpha, two_sided)
 
     out: dict[int, tuple[float, float]] = {}
     for b in range(len(bands) - 1):
@@ -414,17 +434,9 @@ def apply_conformal_by_band(
     median), just with a (lo, hi) that varies by predicted band instead of one global pair.
     """
     band_idx = predicted_bands(interval["median"], bands)
-    median = np.asarray(interval["median"], float)
-    lower = np.asarray(interval["lower"], float)
-    upper = np.asarray(interval["upper"], float)
-
     lo_by_band = np.array([corrections[b][0] for b in range(len(bands) - 1)], float)
     hi_by_band = np.array([corrections[b][1] for b in range(len(bands) - 1)], float)
-    lo, hi = lo_by_band[band_idx], hi_by_band[band_idx]
-
-    new_lower = np.minimum(lower - lo, median)
-    new_upper = np.maximum(upper + hi, median)
-    return {"lower": new_lower, "median": median, "upper": new_upper}
+    return apply_conformal(interval, (lo_by_band[band_idx], hi_by_band[band_idx]))
 
 
 def tune_lgbm(x, y, groups, cfg) -> dict[str, Any]:

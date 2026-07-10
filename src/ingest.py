@@ -1,12 +1,12 @@
 """Stage 1 — Ingest & sample.
 
 Stream a zstandard-compressed Lichess monthly dump, keep only rated blitz games that carry
-stored ``[%eval]`` annotations (Option A), reservoir-sample to a configurable size, and write a
-tidy parquet with the game headers plus the raw movetext (evals/clocks preserved) for the
-feature stage to re-parse.
+stored ``[%eval]`` annotations, reservoir-sample to a configurable size, and write a tidy parquet
+with the game headers plus the raw movetext (evals/clocks preserved) for the feature stage to
+re-parse.
 
-Do this ONCE per shared sample: one person runs it, commits the script, and shares the parquet
-via a drive (never git). See PROJECT_ARCHITECTURE.md §Stage 1 and the schema contract in README.
+Do this ONCE per shared sample: run it, commit the script, and share the parquet via a drive
+(never git). See PROJECT_ARCHITECTURE.md and the schema contract in README.
 
 Run:
     python -m src.ingest                          # uses config.yaml (month -> data/raw/<dump>.pgn.zst)
@@ -135,22 +135,26 @@ def stream_game_chunks(path: str | Path) -> Iterator[tuple[str, str]]:
 # expensive SAN parse on these is behavior-preserving. The real checks still run, post-parse, as
 # the source of truth for the funnel counts and output rows.
 # --------------------------------------------------------------------------------------
-_TIME_CONTROL_RE = re.compile(r'\[TimeControl "([^"]*)"\]')
-_TERMINATION_RE = re.compile(r'\[Termination "([^"]*)"\]')
+# Anchored per-line, same tag-value grammar as python-chess's own TAG_REGEX (chess/pgn.py), so a
+# duplicated tag is resolved the same way: python-chess's header dict keeps the LAST occurrence
+# (plain assignment while scanning top to bottom), so we take the last regex match too -- taking
+# the first would let this mirror reject a game the authoritative parse would accept.
+_TIME_CONTROL_RE = re.compile(r'^\[TimeControl "([^\r\n]*)"\]\s*$', re.MULTILINE)
+_TERMINATION_RE = re.compile(r'^\[Termination "([^\r\n]*)"\]\s*$', re.MULTILINE)
 
 
 def string_is_blitz(headers_text: str, lo: int, hi: int) -> bool:
     """Mirrors ``is_blitz`` by regex-extracting ``TimeControl`` straight from the header text."""
-    m = _TIME_CONTROL_RE.search(headers_text)
-    time_control = m.group(1) if m else None
+    matches = _TIME_CONTROL_RE.findall(headers_text)
+    time_control = matches[-1] if matches else None
     est = estimate_seconds(time_control)
     return est is not None and lo <= est <= hi
 
 
 def string_termination_ok(headers_text: str, keep: list[str]) -> bool:
     """Mirrors ``termination_ok`` by regex-extracting ``Termination`` from the header text."""
-    m = _TERMINATION_RE.search(headers_text)
-    termination = m.group(1) if m else None
+    matches = _TERMINATION_RE.findall(headers_text)
+    termination = matches[-1] if matches else None
     return termination in keep
 
 
@@ -393,8 +397,14 @@ def run_ingest(
 
         # Re-apply the authoritative checks on the real parsed game, exactly as before the
         # prefilter existed. The string-level checks above are necessary-condition mirrors, not
-        # guarantees, so this remains the source of truth for has_eval/clean/output rows.
-        if not header_ok(h):
+        # guarantees, so this remains the source of truth for has_eval/clean/output rows. Fail
+        # closed: one unparseable/unexpected header must drop that game, not abort a multi-hour
+        # unattended scan over a 30GB+ dump.
+        try:
+            keep = header_ok(h)
+        except Exception:
+            keep = False
+        if not keep:
             if should_stop():
                 break
             continue

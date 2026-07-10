@@ -283,10 +283,12 @@ def extract_player_features(
                     move_times.append(spent)
                     if is_scramble:
                         scramble_move_times.append(spent)
-            if remaining is not None:
-                prev_remaining = remaining
-                if remaining < time_trouble_seconds:
-                    n_time_trouble += 1
+            # Always advance, even to None: a move with no clock annotation makes the NEXT move's
+            # remaining time genuinely unknown, not "same as last observed" -- carrying the stale
+            # value forward would misjudge that next move's scramble/time-trouble status.
+            prev_remaining = remaining
+            if remaining is not None and remaining < time_trouble_seconds:
+                n_time_trouble += 1
 
             if after_w is not None and prev_white_cp is not None:
                 mover_after = after_w if want_white else -after_w

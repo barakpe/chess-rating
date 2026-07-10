@@ -1,14 +1,15 @@
 # Experiment log
 
-The running record of model runs — how three people stay in sync on "what's our best model right
-now." Each run appends a block (features used, n_train/n_test, MAE/RMSE). `python -m src.model`
-appends here automatically. Newest at the bottom.
+The running record of model runs — how we track "what's our best model right now." Each run
+appends a block (features used, n_train/n_test, MAE/RMSE), headed by the commit that produced it
+so any entry can be traced back to the exact code. `python -m src.model` / `python -m src.evaluate`
+append here automatically. Newest at the bottom.
 
 MAE/RMSE are in Elo points. Reference baselines:
 - **predict_mean** — predict the training-mean rating for everyone (trivial floor).
 - **copy_opponent** — predict the opponent's rating (strong, but a leak; excluded from the model).
 
-## 2026-07-03 00:19 — baseline (no-engine features)
+## 39042c6 — baseline (no-engine features)
 n_train=47109, n_test=11753, features=game_plies, player_moves, n_captures, n_checks, result, time_control, eco
 
 | model | MAE | RMSE |
@@ -18,7 +19,7 @@ n_train=47109, n_test=11753, features=game_plies, player_moves, n_captures, n_ch
 | ridge | 295.7 | 368.0 |
 | lightgbm | 285.4 | 361.5 |
 
-## 2026-07-03 00:20 — improved model
+## 39042c6 — improved model
 n_train=37802, n_test=11753, n_features=65
 
 | stage | MAE | RMSE |
@@ -31,7 +32,7 @@ n_train=37802, n_test=11753, n_features=65
 - aggregation MAE: K1=237, K2=215, K3=222, K5=222, K10=224
 - ablation (MAE↑ when dropped): engine +31.4, style +10.9, clock +8.1, opening +7.6
 
-## 2026-07-03 00:58 — improved model (tuned)
+## 3d5d009 — improved model (tuned)
 n_train=37802, n_test=11753, n_features=65
 
 | stage | MAE | RMSE |
@@ -45,7 +46,7 @@ n_train=37802, n_test=11753, n_features=65
 - aggregation MAE: K1=236, K2=213, K3=221, K5=220, K10=222
 - ablation (MAE↑ when dropped): engine +31.4, style +10.9, clock +8.1, opening +7.6
 
-## 2026-07-05 17:31 — improved model
+## af18296 — improved model
 n_train=32033, n_calib=5769, n_test=11753, n_features=69
 
 | stage | MAE | RMSE |
@@ -61,7 +62,7 @@ n_train=32033, n_calib=5769, n_test=11753, n_features=69
 - aggregation MAE: K1=238, K2=217, K3=225, K5=226, K10=233
 - ablation (MAE↑ when dropped): engine +31.5, style +10.0, clock +7.6, opening +6.6
 
-## 2026-07-05 17:31 — tail study
+## af18296 — tail study
 
 | variant | overall | tail | mid | 0-1200 | 1200-1400 | 1400-1600 | 1600-1800 | 1800-2000 | 2000-3000 |
 |---|---|---|---|---|---|---|---|---|---|
@@ -69,7 +70,7 @@ n_train=32033, n_calib=5769, n_test=11753, n_features=69
 | reweighted(s=0.5) | 244.2 | 326 | 191 | 348 | 201 | 175 | 175 | 211 | 303 |
 | deshrink(slope=1.06) | 243.2 | 309 | 201 | 345 | 214 | 192 | 185 | 212 | 274 |
 
-## 2026-07-05 — missing-value encoding A/B (same grouped splits, untuned)
+## af18296 — missing-value encoding A/B (same grouped splits, untuned)
 Old encoding (65 feats: absent-phase counts=0, stds=0 at n=1, time_trouble_share=0 with no clock)
 vs new unified NaN contract + has_* flags (69 feats). Identical usernames/seed => identical splits.
 
@@ -82,7 +83,7 @@ Verdict: performance-neutral (dMAE +0.5, within split noise) - adopted for corre
 "no endgame existed" is no longer encoded as "0 endgame errors", and absence is explicitly
 splittable via has_middlegame/has_endgame/has_clock. CQR coverage is robust to either encoding.
 
-## 2026-07-05 21:43 — improved model
+## af18296 — improved model
 n_train=329353, n_calib=59124, n_test=120513, n_features=69
 
 | stage | MAE | RMSE |
@@ -98,7 +99,7 @@ n_train=329353, n_calib=59124, n_test=120513, n_features=69
 - aggregation MAE: K1=235, K2=209, K3=202, K5=200, K10=203, K20=218
 - ablation (MAE↑ when dropped): engine +33.8, clock +9.8, style +8.1, opening +8.0
 
-## 2026-07-06 01:12 — improved model (tuned)
+## 4657ac4 — improved model (tuned)
 n_train=329353, n_calib=59124, n_test=120513, n_features=69
 
 | stage | MAE | RMSE |
@@ -115,7 +116,7 @@ n_train=329353, n_calib=59124, n_test=120513, n_features=69
 - aggregation MAE: K1=233, K2=207, K3=201, K5=199, K10=202, K20=217
 - ablation (MAE↑ when dropped): engine +33.8, clock +9.8, style +8.1, opening +8.0
 
-## 2026-07-06 01:29 — improved model
+## 4657ac4 — improved model
 n_train=329353, n_calib=59124, n_test=120513, n_features=77
 
 | stage | MAE | RMSE |
@@ -133,7 +134,7 @@ n_train=329353, n_calib=59124, n_test=120513, n_features=77
 - aggregation MAE: K1=235, K2=209, K3=202, K5=200, K10=203, K20=217
 - ablation (MAE↑ when dropped): engine +33.6, clock +9.1, opening +8.2, style +7.9
 
-## 2026-07-07 00:11 — improved model (tuned)
+## f423cb6 — improved model (tuned)
 n_train=329353, n_calib=59124, n_test=120513, n_features=77
 
 | stage | MAE | RMSE |
