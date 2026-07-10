@@ -6,7 +6,9 @@ month: "2025-05"                 # a recent COMPLETE month; must exist on https:
 time_control: "blitz"            # human label; the real filter is blitz_estimate_seconds below
 blitz_estimate_seconds: [180, 479]   # keep if (base + 40*inc) is in this inclusive range
                                      # (scalachess Speed ranges: Blitz = 180..479s)
-use_stored_evals: true           # Option A — only keep games that already carry [%eval]
+use_stored_evals: true           # only keep games that already carry a stored [%eval] (Stockfish
+                                  # analysis players requested on Lichess) rather than computing
+                                  # our own evals from scratch
 
 # --- Sampling ---
 sample_size: 300000              # bump up on a stronger machine

@@ -2,13 +2,13 @@
 
 Estimate a Lichess player's **blitz** rating from *how they play a single game* — a regression
 problem (Elo point estimate + a per-game uncertainty interval), with rating bands derived for a
-confusion matrix. We use games that already carry stored Stockfish `[%eval]` annotations
-(Option A). Gradient-boosted trees are the graded core; a neural sequence model and cheating
-detection are labeled stretch goals.
+confusion matrix. We use games that already carry stored Stockfish `[%eval]` annotations, rather
+than computing our own. Gradient-boosted trees are the core model; a neural sequence model and
+cheating detection are stretch goals.
 
 See [`PROJECT_ARCHITECTURE.md`](PROJECT_ARCHITECTURE.md) for the full design rationale. This
 README is the operational contract: how to set up, what to run in what order, the data interface
-between stages, and the conventions all three of us follow.
+between stages, and the conventions the codebase follows.
 
 ---
 
@@ -20,7 +20,7 @@ pip install -r requirements.txt
 pytest                                                # math regression + fixture smoke test
 ```
 
-Python 3.10+. Stockfish is **not** needed (Option A reads evals already in the PGN).
+Python 3.10+. Stockfish is **not** needed — evals are already stored in the PGN.
 
 ---
 
@@ -38,7 +38,7 @@ Python 3.10+. Stockfish is **not** needed (Option A reads evals already in the P
 | `src/plotting.py` | Shared matplotlib style + `save_fig` (every deck figure → `reports/figures/`). |
 | `tests/` | Unit tests per stage + `fixtures/` (tiny synthetic dump for the ingest smoke test). |
 | `data/` | **Gitignored, never committed.** `raw/` = downloaded dumps, `processed/` = parquet outputs. |
-| `notebooks/` | Exploration only; numbered, run top-to-bottom. Added in their phases. |
+| `notebooks/` | Exploration only; numbered, run top-to-bottom. |
 | `reports/figures/` | Saved PNGs the slides pull from. |
 
 Rule of thumb: **notebooks are for looking; `src/` is for doing.** Anything run more than once or
@@ -58,7 +58,7 @@ parallel against the interface (not by reading each other's code).
 | 4 | `python -m src.features` | `games_clean.parquet` + `instances.parquet` | `features.parquet` |
 | 5 | `python -m src.model` | `features.parquet` + `games_clean.parquet` | baseline MAE/RMSE → `reports/results.md` |
 | 6 | `python -m src.evaluate` `[--tune]` | `features.parquet` + `games_clean.parquet` | improved model + eval + error analysis → figures + `reports/results.md` |
-| 7 | notebooks `01`→`04` *(later)* | `features.parquet` | figures + `reports/results.md` |
+| 7 | notebooks `01`→`05` *(later)* | `features.parquet` | figures + `reports/results.md` |
 
 **Stage 6 (`src/evaluate.py`)** trains the improved model on the full engine+clock features and reports
 the improvement table (no-engine baseline → +engine → tuned), the **90% prediction interval** from
@@ -88,7 +88,7 @@ python -m src.ingest --input tests/fixtures/sample.pgn.zst --output data/process
 ## Parquet schema contract — `blitz_sample.parquet`
 
 The exact columns `ingest.py` writes (defined once as `src.ingest.INGEST_COLUMNS`). This is the
-interface Person A (ingest) hands to B/C (features/model).
+interface the ingest stage hands to the features/model stages.
 
 | column | dtype | source | note |
 |---|---|---|---|
@@ -134,7 +134,7 @@ split train/test by `username` (GroupKFold / grouped hold-out), never by game.
 ## `features.parquet` (Stage 4)
 
 `src/features.py` parses each game once and emits **one row per instance** (`game_id, color,
-username, rating, result, time_control, eco, opening` + 66 numeric features). Built on the verified
+username, rating, result, time_control, eco, opening` + 73 numeric features). Built on the verified
 `win_percent`/`accuracy_percent`/`classify_move` primitives; every quality feature is computed
 overall **and** per phase (`opening_` / `middlegame_` / `endgame_`). Feature groups:
 
@@ -161,24 +161,12 @@ single-game prediction can't see a player's other games.
 
 ---
 
-## Conventions (all three of us)
+## Conventions
 
 ### Never commit
 Data, models, or large/binary artifacts. `.gitignore` covers `data/`, `models/`, `*.pgn`,
 `*.pgn.zst`, `*.zst`, `*.parquet`. The one exception is the tiny `tests/fixtures/` dump. Small
 result PNGs in `reports/figures/` may be committed; large ones, don't.
-
-### Git workflow
-- `main` always stays runnable. Work on **feature branches** named by area: `feat/…`, `eda/…`,
-  `model/…` (e.g. `feat/phase-split-features`).
-- Merge via **PR with ≥1 teammate review**. No direct pushes to `main`.
-- **Commits:** small, atomic, imperative mood, with a prefix:
-  `feat:` `fix:` `docs:` `refactor:` `chore:` `exp:` (experiment runs) `data:` (pipeline/schema).
-  Example: `feat: add phase-split centipawn-loss features`.
-- Add a dependency and update `requirements.txt` in the **same PR**.
-- **Notebook hygiene:** clear outputs before committing (`nbstripout` or "Clear All Outputs") so
-  diffs stay readable. Keep notebooks thin; shared logic goes in `src/`.
-- **Tag milestones:** `v0.1-baseline`, `v0.2-improved`, …
 
 ### Reproducibility
 Fix `random_seed` everywhere; pin `requirements.txt`; keep every knob in `config.yaml`. Notebooks
@@ -186,11 +174,11 @@ must run top-to-bottom (Restart & Run All) before they're considered done.
 
 ---
 
-## Limitations (state these in the write-up)
+## Limitations
 
-- **Option-A selection bias:** games with stored evals were chosen by players for analysis, so the
-  eval'd subset (~6% of games) isn't a random sample. Backlog: validate against an Option-B random
-  sample with self-computed fixed-depth evals.
+- **Selection bias in the eval'd subset:** games with stored evals were chosen by players for
+  analysis, so that subset (~6% of games) isn't a random sample. Backlog: validate against a
+  random sample with self-computed fixed-depth evals.
 - **Provisional ratings not filterable:** Lichess strips provisional status from exported PGN (no
   `?` marker, no flag), so `config.yaml`'s `drop_provisional` is a **documented no-op** — we can't
   drop provisional-rated (noisier) labels from the dump. Recorded so the intent is explicit.
