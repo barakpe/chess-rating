@@ -2,13 +2,13 @@
 
 Estimate a Lichess player's **blitz** rating from *how they play a single game* — a regression
 problem (Elo point estimate + a per-game uncertainty interval), with rating bands derived for a
-confusion matrix. We use games that already carry stored Stockfish `[%eval]` annotations
-(Option A). Gradient-boosted trees are the graded core; a neural sequence model and cheating
-detection are labeled stretch goals.
+confusion matrix. We use games that already carry stored Stockfish `[%eval]` annotations, rather
+than computing our own. Gradient-boosted trees are the core model; a neural sequence model and
+cheating detection are stretch goals.
 
 See [`PROJECT_ARCHITECTURE.md`](PROJECT_ARCHITECTURE.md) for the full design rationale. This
 README is the operational contract: how to set up, what to run in what order, the data interface
-between stages, and the conventions all three of us follow.
+between stages, and the conventions the codebase follows.
 
 ---
 
@@ -20,7 +20,7 @@ pip install -r requirements.txt
 pytest                                                # math regression + fixture smoke test
 ```
 
-Python 3.10+. Stockfish is **not** needed (Option A reads evals already in the PGN).
+Python 3.10+. Stockfish is **not** needed — evals are already stored in the PGN.
 
 ---
 
@@ -38,7 +38,7 @@ Python 3.10+. Stockfish is **not** needed (Option A reads evals already in the P
 | `src/plotting.py` | Shared matplotlib style + `save_fig` (every deck figure → `reports/figures/`). |
 | `tests/` | Unit tests per stage + `fixtures/` (tiny synthetic dump for the ingest smoke test). |
 | `data/` | **Gitignored, never committed.** `raw/` = downloaded dumps, `processed/` = parquet outputs. |
-| `notebooks/` | Exploration only; numbered, run top-to-bottom. Added in their phases. |
+| `notebooks/` | Exploration only; numbered, run top-to-bottom. |
 | `reports/figures/` | Saved PNGs the slides pull from. |
 
 Rule of thumb: **notebooks are for looking; `src/` is for doing.** Anything run more than once or
@@ -58,11 +58,12 @@ parallel against the interface (not by reading each other's code).
 | 4 | `python -m src.features` | `games_clean.parquet` + `instances.parquet` | `features.parquet` |
 | 5 | `python -m src.model` | `features.parquet` + `games_clean.parquet` | baseline MAE/RMSE → `reports/results.md` |
 | 6 | `python -m src.evaluate` `[--tune]` | `features.parquet` + `games_clean.parquet` | improved model + eval + error analysis → figures + `reports/results.md` |
-| 7 | notebooks `01`→`04` *(later)* | `features.parquet` | figures + `reports/results.md` |
+| 7 | notebooks `01`→`05` *(later)* | `features.parquet` | figures + `reports/results.md` |
 
 **Stage 6 (`src/evaluate.py`)** trains the improved model on the full engine+clock features and reports
 the improvement table (no-engine baseline → +engine → tuned), the **90% prediction interval** from
-three quantile LightGBMs (empirical coverage + pinball loss), rating-band accuracy + confusion matrix,
+three quantile LightGBMs **conformalized via split CQR** on a dedicated grouped calibration split
+(raw and conformalized coverage + width, per-band coverage, pinball loss), rating-band accuracy + confusion matrix,
 the **aggregation curve** (MAE vs games-per-player — single-game noise vs precision by averaging),
 calibration, and **SHAP** importances. Stage 8 adds error analysis (largest residuals, residual by band
 & game length) and **feature-group ablations**. Everything is split by `username` (never by game).
@@ -87,7 +88,7 @@ python -m src.ingest --input tests/fixtures/sample.pgn.zst --output data/process
 ## Parquet schema contract — `blitz_sample.parquet`
 
 The exact columns `ingest.py` writes (defined once as `src.ingest.INGEST_COLUMNS`). This is the
-interface Person A (ingest) hands to B/C (features/model).
+interface the ingest stage hands to the features/model stages.
 
 | column | dtype | source | note |
 |---|---|---|---|
@@ -133,7 +134,7 @@ split train/test by `username` (GroupKFold / grouped hold-out), never by game.
 ## `features.parquet` (Stage 4)
 
 `src/features.py` parses each game once and emits **one row per instance** (`game_id, color,
-username, rating, result, time_control, eco, opening` + ~60 numeric features). Built on the verified
+username, rating, result, time_control, eco, opening` + 73 numeric features). Built on the verified
 `win_percent`/`accuracy_percent`/`classify_move` primitives; every quality feature is computed
 overall **and** per phase (`opening_` / `middlegame_` / `endgame_`). Feature groups:
 
@@ -143,6 +144,15 @@ overall **and** per phase (`opening_` / `middlegame_` / `endgame_`). Feature gro
 - **Time:** `move_time_{mean,std,median}` from `[%clk]` deltas, `fast_move_share`, `time_trouble_share`.
 - **Style:** `game_plies`, `player_moves`, `n_captures`, `n_checks`, `reached_winning`,
   `converted_winning` (did they win from a winning position?).
+- **Presence flags:** `has_opening`, `has_middlegame`, `has_endgame`, `has_clock` (0/1).
+
+**Missing-value contract:** NaN means *not observable*, 0 is reserved for a true zero (exposure
+counts like `{phase}_n_moves`/`n_timed_moves`, or a genuinely computed zero). A phase with no
+moves gets `n_moves = 0` and NaN for **all** its other aggregates (including the error counts —
+a count is only meaningful conditional on exposure); `*_std` is NaN below 2 observations; all
+clock features are NaN when a game carries no `[%clk]`. LightGBM consumes NaN natively (learns a
+default split direction) — no sentinel values or imputation, and the flags make absence directly
+splittable. ~38% of instances have no endgame block, ~8% no middlegame.
 
 Same leakage guarantee: the eval before/after a move is taken from *this* player's POV only; no
 opponent-derived quantity enters a feature. Cross-game aggregates (opening-diversity entropy, the
@@ -151,24 +161,12 @@ single-game prediction can't see a player's other games.
 
 ---
 
-## Conventions (all three of us)
+## Conventions
 
 ### Never commit
 Data, models, or large/binary artifacts. `.gitignore` covers `data/`, `models/`, `*.pgn`,
 `*.pgn.zst`, `*.zst`, `*.parquet`. The one exception is the tiny `tests/fixtures/` dump. Small
 result PNGs in `reports/figures/` may be committed; large ones, don't.
-
-### Git workflow
-- `main` always stays runnable. Work on **feature branches** named by area: `feat/…`, `eda/…`,
-  `model/…` (e.g. `feat/phase-split-features`).
-- Merge via **PR with ≥1 teammate review**. No direct pushes to `main`.
-- **Commits:** small, atomic, imperative mood, with a prefix:
-  `feat:` `fix:` `docs:` `refactor:` `chore:` `exp:` (experiment runs) `data:` (pipeline/schema).
-  Example: `feat: add phase-split centipawn-loss features`.
-- Add a dependency and update `requirements.txt` in the **same PR**.
-- **Notebook hygiene:** clear outputs before committing (`nbstripout` or "Clear All Outputs") so
-  diffs stay readable. Keep notebooks thin; shared logic goes in `src/`.
-- **Tag milestones:** `v0.1-baseline`, `v0.2-improved`, …
 
 ### Reproducibility
 Fix `random_seed` everywhere; pin `requirements.txt`; keep every knob in `config.yaml`. Notebooks
@@ -176,27 +174,43 @@ must run top-to-bottom (Restart & Run All) before they're considered done.
 
 ---
 
-## Limitations (state these in the write-up)
+## Limitations
 
-- **Option-A selection bias:** games with stored evals were chosen by players for analysis, so the
-  eval'd subset (~6% of games) isn't a random sample. Backlog: validate against an Option-B random
-  sample with self-computed fixed-depth evals.
+- **Selection bias in the eval'd subset:** games with stored evals were chosen by players for
+  analysis, so that subset (~6% of games) isn't a random sample. Backlog: validate against a
+  random sample with self-computed fixed-depth evals.
 - **Provisional ratings not filterable:** Lichess strips provisional status from exported PGN (no
   `?` marker, no flag), so `config.yaml`'s `drop_provisional` is a **documented no-op** — we can't
   drop provisional-rated (noisier) labels from the dump. Recorded so the intent is explicit.
 - **Single-game noise floor:** one blitz game can't pin a rating; precision comes from aggregating
   across a player's games. This is a finding, not a bug.
 - **Tail error is (mostly) irreducible single-game noise, not fixable bias.** Error concentrates at
-  the rating extremes (0–1200 MAE 347, over-predicting; 2000+ MAE 280, under-predicting) vs ~180 in
-  the middle. We tested corrections (`python -m src.evaluate --tail-study`): post-hoc de-shrink fits a
-  slope of **≈1.01** — i.e. the model is **already calibrated** (E[true|pred] ≈ pred) — and band
-  reweighting only *redistributes* error across bands (overall MAE flat-to-worse). So the tail
-  shrinkage is the statistically optimal response to weak single-game evidence, not a bug. The real
-  levers are **aggregation** (more games per player) and **better tail-discriminating features**.
+  the rating extremes (300k: 0–1200 MAE 313, over-predicting; 2000+ MAE 282, under-predicting) vs
+  ~190 in the middle. We tested corrections (`python -m src.evaluate --tail-study`): post-hoc
+  de-shrink fits a slope of **≈1.0** — i.e. the model is **already calibrated** (E[true|pred] ≈
+  pred) — and band reweighting only *redistributes* error across bands. We also added
+  **clock-scramble features** (quality/tempo with <30s on the clock, incl. the degradation delta
+  vs overall CPL): individually informative (median degradation +8 cpl under pressure) but overall
+  and tail MAE unchanged (239.4 → 239.1; tails 313/282 → 313/282) — the existing clock+quality
+  features already carry the signal. So the tail shrinkage is the statistically optimal response
+  to weak single-game evidence, not a bug; the one real lever is **aggregation** (more games per
+  player: MAE 235 at K=1 → 200 at K=5).
 - **Aggregation-curve cohort:** a uniform *game* sample has few players with many games, so each K in
   the aggregation curve is a different, shrinking cohort (higher-K points are noisier and not
-  apples-to-apples). Backlog: a player-stratified sample (pick players, take all their games) would
-  give a cleaner, monotone curve.
-- **Interval calibration:** the raw 90% quantile interval under-covers (~85% empirically); backlog is
-  conformalized quantile regression (CQR) to recalibrate width for guaranteed marginal coverage.
+  apples-to-apples). `ingest.py` now also writes a **player-cohort sample**
+  (`player_cohort` in config: all games of a small hash-sampled player subset →
+  `data/processed/player_cohort.parquet`) so the curve can be computed on complete per-player
+  game sets once the large-sample run lands.
+- **Interval calibration — resolved by CQR, with a conditional-coverage caveat.** The raw 90%
+  quantile interval under-covers (~85%). We now apply split conformalized quantile regression
+  (CQR): a dedicated grouped **calibration split** (never seen by any fit; see `model.calib_size`)
+  supplies a finite-sample correction that widens/narrows the interval for guaranteed *marginal*
+  coverage (measured on 300k: raw 87.4% → CQR 89.8%). The guarantee is marginal only: per-band
+  coverage still dips at the extremes (~78% at 0–1200, ~81% at 2000+) because interval width barely
+  adapts across bands (see `reports/figures/interval_by_band.png`). **Band-conditional (Mondrian)
+  CQR was implemented and measured** (`model.mondrian_cqr`): it guarantees coverage conditional on
+  the *predicted* band (the only test-time-legal conditioning), but per-*true*-band coverage is
+  unchanged vs plain CQR (78/96/98/98/95/81) — prediction shrinkage leaves the extreme predicted
+  bands nearly empty, so no test-time-legal recalibration can fix true-band tail coverage. This is
+  the interval-space face of the single-game noise floor, not a calibration defect.
 - **Scope:** blitz only; results may not transfer to rapid/classical.

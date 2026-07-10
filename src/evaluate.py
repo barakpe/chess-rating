@@ -30,14 +30,21 @@ import pandas as pd
 
 from src.model import (
     BASELINE_FEATURES,
+    _append_md,
     add_opponent_rating,
+    apply_conformal,
+    apply_conformal_by_band,
     band_sample_weights,
+    conformal_correction,
+    conformal_correction_by_band,
+    current_commit_hash,
     fit_early_stopping,
-    grouped_train_val_test,
+    grouped_train_val_calib_test,
     make_point_model,
     predict_interval,
     prepare_features,
     split_feature_columns,
+    to_bands,
     train_quantile_models,
     tune_lgbm,
 )
@@ -62,17 +69,29 @@ def pinball_loss(y: np.ndarray, pred: np.ndarray, alpha: float) -> float:
     return float(np.mean(np.maximum(alpha * err, (alpha - 1.0) * err)))
 
 
-def to_bands(values: np.ndarray, bands: list[int]) -> np.ndarray:
-    """Bucket ratings into band indices 0..len(bands)-2 using the config edges."""
-    # bands like [0,1200,...,3000]; interior edges define the buckets.
-    return np.digitize(np.asarray(values, float), bands[1:-1], right=False)
-
-
 def band_accuracy(y_true: np.ndarray, y_pred: np.ndarray, bands: list[int]) -> tuple[float, float]:
     """Exact-band and adjacent-band (|Δband| <= 1) accuracy."""
     bt, bp = to_bands(y_true, bands), to_bands(y_pred, bands)
     diff = np.abs(bt - bp)
     return float(np.mean(diff == 0)), float(np.mean(diff <= 1))
+
+
+def _coverage_by_band(
+    y_true: np.ndarray, lower: np.ndarray, upper: np.ndarray, bands: list[int]
+) -> list[dict[str, float]]:
+    """Empirical interval coverage + mean width per rating band (does under-coverage hide in a tail?)."""
+    y_true, lower, upper = (np.asarray(a, float) for a in (y_true, lower, upper))
+    bt = to_bands(y_true, bands)
+    out = []
+    for b in range(len(bands) - 1):
+        m = bt == b
+        if m.any():
+            out.append({
+                "band": f"{bands[b]}-{bands[b+1]}", "n": int(m.sum()),
+                "coverage": interval_coverage(y_true[m], lower[m], upper[m]),
+                "mean_width": mean_interval_width(lower[m], upper[m]),
+            })
+    return out
 
 
 def _rank(a: np.ndarray) -> np.ndarray:
@@ -129,7 +148,9 @@ def _band_mae_table(y_true: np.ndarray, y_pred: np.ndarray, bands: list[int]) ->
     return out
 
 
-def run_tail_study(cfg: dict[str, Any], features_path, games_path) -> dict[str, dict[str, float]]:
+def run_tail_study(
+    cfg: dict[str, Any], features_path, games_path, results_md: str | Path | None = None
+) -> dict[str, dict[str, float]]:
     """Compare the point model plain vs band-reweighted vs post-hoc de-shrink, per rating band.
 
     Answers "how much of the tail regression-to-the-mean can we remove, and at what cost?"
@@ -140,8 +161,8 @@ def run_tail_study(cfg: dict[str, Any], features_path, games_path) -> dict[str, 
     num, cat = split_feature_columns(df)
     full = num + cat
     df = prepare_features(df, cat)
-    train, val, test = grouped_train_val_test(df, cfg)
-    y_tr, y_val, y_te = (s["rating"].to_numpy(float) for s in (train, val, test))
+    train, val, calib, test = grouped_train_val_calib_test(df, cfg)
+    y_tr, y_val, y_cal, y_te = (s["rating"].to_numpy(float) for s in (train, val, calib, test))
     bands = cfg["rating_bands"]
 
     plain = make_point_model(cfg)
@@ -153,7 +174,9 @@ def run_tail_study(cfg: dict[str, Any], features_path, games_path) -> dict[str, 
     fit_early_stopping(weighted, train[full], y_tr, val[full], y_val, cfg, sample_weight=weights)
     pred_weighted = weighted.predict(test[full])
 
-    coef = fit_deshrink(plain.predict(val[full]), y_val)
+    # de-shrink is fit on CALIB (never seen by early stopping) so the correction isn't tuned on
+    # the same data the model used to pick its stopping point.
+    coef = fit_deshrink(plain.predict(calib[full]), y_cal)
     pred_deshrink = apply_deshrink(pred_plain, coef)
 
     variants = {
@@ -162,6 +185,8 @@ def run_tail_study(cfg: dict[str, Any], features_path, games_path) -> dict[str, 
         f"deshrink(slope={coef[0]:.2f})": _band_mae_table(y_te, pred_deshrink, bands),
     }
     _print_tail_study(variants, bands)
+    if results_md is not None:
+        _append_tail_study_md(results_md, variants, bands)
     return variants
 
 
@@ -174,6 +199,22 @@ def _print_tail_study(variants: dict[str, dict[str, float]], bands: list[int]) -
         row = f"  {name:<24}{tbl['overall']:>8.1f}{tbl['tail']:>7.0f}{tbl['mid']:>7.0f}   "
         row += "".join(f"{tbl[c]:>11.0f}" for c in band_cols)
         print(row)
+
+
+def _append_tail_study_md(path: str | Path, variants: dict[str, dict[str, float]], bands: list[int]) -> None:
+    band_cols = [f"{bands[b]}-{bands[b+1]}" for b in range(len(bands) - 1)]
+    header = ["variant", "overall", "tail", "mid"] + band_cols
+    lines = [
+        f"\n## {current_commit_hash()} — tail study",
+        "",
+        "| " + " | ".join(header) + " |",
+        "|" + "---|" * len(header),
+    ]
+    for name, tbl in variants.items():
+        row = [name, f"{tbl['overall']:.1f}", f"{tbl['tail']:.0f}", f"{tbl['mid']:.0f}"]
+        row += [f"{tbl[c]:.0f}" for c in band_cols]
+        lines.append("| " + " | ".join(row) + " |")
+    _append_md(path, lines)
 
 
 def per_player_metrics(test_df: pd.DataFrame) -> dict[str, float]:
@@ -268,6 +309,27 @@ def _fig_calibration(y, yhat, bins, figures_dir):
     return save_fig(fig, "calibration", figures_dir)
 
 
+def _fig_interval_by_band(y, lower, upper, bands, figures_dir):
+    import matplotlib.pyplot as plt
+
+    from src.plotting import save_fig, set_style
+    set_style()
+    cov = _coverage_by_band(y, lower, upper, bands)
+    labels = [c["band"] for c in cov]
+    coverages = [c["coverage"] * 100 for c in cov]
+    widths = [c["mean_width"] for c in cov]
+    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(11, 4.5))
+    ax1.bar(labels, coverages)
+    ax1.axhline(90, color="k", ls="--", lw=1)
+    ax1.set(xlabel="Rating band", ylabel="Coverage (%)", title="90% interval coverage by band (CQR)")
+    ax1.tick_params(axis="x", rotation=45)
+    ax2.bar(labels, widths)
+    ax2.set(xlabel="Rating band", ylabel="Mean interval width (Elo)", title="Interval width by band (CQR)")
+    ax2.tick_params(axis="x", rotation=45)
+    fig.tight_layout()
+    return save_fig(fig, "interval_by_band", figures_dir)
+
+
 def _fig_confusion(y, yhat, bands, figures_dir):
     import matplotlib.pyplot as plt
     import seaborn as sns
@@ -339,12 +401,13 @@ def run_evaluation(
     num_cols, cat_cols = split_feature_columns(df)
     full_features = num_cols + cat_cols
     df = prepare_features(df, cat_cols)
-    train, val, test = grouped_train_val_test(df, cfg)
+    train, val, calib, test = grouped_train_val_calib_test(df, cfg)
 
-    y_tr, y_val, y_te = (s["rating"].to_numpy(float) for s in (train, val, test))
+    y_tr, y_val, y_cal, y_te = (s["rating"].to_numpy(float) for s in (train, val, calib, test))
+    bands = cfg["rating_bands"]
     figures_dir = cfg["paths"]["figures"]
-    results: dict[str, Any] = {"n_train": len(train), "n_val": len(val), "n_test": len(test),
-                               "n_features": len(full_features)}
+    results: dict[str, Any] = {"n_train": len(train), "n_val": len(val), "n_calib": len(calib),
+                               "n_test": len(test), "n_features": len(full_features)}
 
     def fit_point(features_list, params=None):
         model = make_point_model(cfg, params)
@@ -370,17 +433,57 @@ def run_evaluation(
         results["best_params"] = best_params
         best_model, best_pred = tuned, tuned_pred
 
-    # --- quantile interval ---
+    # --- quantile interval, conformalized against the held-out calib split ---
+    # Two intervals are always computed: plain split-CQR (one global correction) and Mondrian
+    # (band-conditional) CQR — a separate correction per PREDICTED-median band, which fixes the
+    # plain interval's tendency to under-cover the rating extremes and over-cover the middle.
+    # ``model.mondrian_cqr`` selects which one is the HEADLINE interval (coverage/width/coverage_by_band
+    # below); both are reported so the improvement is visible.
+    quantiles = cfg["model"]["quantiles"]
+    alpha = round(1.0 - (max(quantiles) - min(quantiles)), 10)   # e.g. [0.05,0.5,0.95] -> 0.10
     qmodels = train_quantile_models(train[full_features], y_tr, val[full_features], y_val, cfg, best_params)
-    interval = predict_interval(qmodels, test[full_features], cfg["model"]["quantiles"])
-    lo, med, up = interval["lower"], interval["median"], interval["upper"]
+
+    interval_cal = predict_interval(qmodels, calib[full_features], quantiles)
+    interval_raw = predict_interval(qmodels, test[full_features], quantiles)
+
+    # plain (marginal) split-CQR — one global correction applied everywhere.
+    correction = conformal_correction(interval_cal, y_cal, alpha, cfg["model"]["cqr_two_sided"])
+    interval_plain = apply_conformal(interval_raw, correction)
+
+    # Mondrian (band-conditional) split-CQR — band assignment uses the PREDICTED median only (see
+    # conformal_correction_by_band's docstring for the true-band caveat).
+    mondrian_corrections = conformal_correction_by_band(
+        interval_cal, y_cal, alpha, bands, cfg["model"]["cqr_two_sided"], cfg["model"]["mondrian_min_calib"],
+        global_correction=correction,
+    )
+    interval_mondrian = apply_conformal_by_band(interval_raw, mondrian_corrections, bands)
+
+    results["coverage_raw"] = interval_coverage(y_te, interval_raw["lower"], interval_raw["upper"])
+    results["mean_interval_width_raw"] = mean_interval_width(interval_raw["lower"], interval_raw["upper"])
+
+    results["coverage_cqr_plain"] = interval_coverage(y_te, interval_plain["lower"], interval_plain["upper"])
+    results["mean_interval_width_plain"] = mean_interval_width(interval_plain["lower"], interval_plain["upper"])
+    results["coverage_by_band_plain"] = _coverage_by_band(y_te, interval_plain["lower"], interval_plain["upper"], bands)
+
+    results["coverage_cqr_mondrian"] = interval_coverage(y_te, interval_mondrian["lower"], interval_mondrian["upper"])
+    results["mean_interval_width_mondrian"] = mean_interval_width(interval_mondrian["lower"], interval_mondrian["upper"])
+    results["coverage_by_band_mondrian"] = _coverage_by_band(y_te, interval_mondrian["lower"], interval_mondrian["upper"], bands)
+
+    results["mondrian_headline"] = bool(cfg["model"]["mondrian_cqr"])
+    headline = interval_mondrian if results["mondrian_headline"] else interval_plain
+    lo, up = headline["lower"], headline["upper"]
+
     results["coverage"] = interval_coverage(y_te, lo, up)
     results["mean_interval_width"] = mean_interval_width(lo, up)
+    results["conformal_correction"] = correction               # plain global tuple, always
+    results["mondrian_corrections"] = mondrian_corrections      # per predicted-band dict
     results["pinball"] = {a: pinball_loss(y_te, qmodels[a].predict(test[full_features]), a)
-                          for a in cfg["model"]["quantiles"]}
+                          for a in quantiles}
+    results["coverage_by_band"] = (
+        results["coverage_by_band_mondrian"] if results["mondrian_headline"] else results["coverage_by_band_plain"]
+    )
 
     # --- fuller point metrics + band accuracy + confusion ---
-    bands = cfg["rating_bands"]
     results["point"] = point_metrics(y_te, best_pred)
     results["band_exact"], results["band_adjacent"] = band_accuracy(y_te, best_pred, bands)
 
@@ -405,6 +508,7 @@ def run_evaluation(
         _guard(_fig_pred_vs_actual, y_te, best_pred, figures_dir, name="pred_vs_actual")
         _guard(_fig_calibration, y_te, best_pred, cfg["evaluate"]["calibration_bins"], figures_dir, name="calibration")
         _guard(_fig_confusion, y_te, best_pred, bands, figures_dir, name="band_confusion")
+        _guard(_fig_interval_by_band, y_te, lo, up, bands, figures_dir, name="interval_by_band")
         if curve:
             _guard(_fig_aggregation, curve, figures_dir, name="aggregation_curve")
         _guard(_fig_shap, best_model, test[full_features], cfg, figures_dir, name="shap_summary")
@@ -469,7 +573,15 @@ def _print_summary(r: dict[str, Any]) -> None:
     pp = r["per_player"]
     print(f"  per-player (all games)   : {pp['mae']:.1f} MAE over {pp['n_players']:,} players "
           f"({pp['multi_game_share']*100:.0f}% have >=2 games)")
-    print(f"  90% interval coverage    : {r['coverage']*100:.1f}%  (target 90)  width {r['mean_interval_width']:.0f}")
+    print(f"  90% interval coverage    : raw {r['coverage_raw']*100:.1f}% -> CQR(plain) "
+          f"{r['coverage_cqr_plain']*100:.1f}% (target 90); "
+          f"width {r['mean_interval_width_raw']:.0f} -> {r['mean_interval_width_plain']:.0f}")
+    headline = "Mondrian" if r.get("mondrian_headline") else "plain"
+    print(f"  Mondrian CQR             : {r['coverage_cqr_mondrian']*100:.1f}% "
+          f"width {r['mean_interval_width_mondrian']:.0f}  [headline={headline}]; by band: "
+          + "  ".join(f"{b['band']}={b['coverage']*100:.0f}%" for b in r["coverage_by_band_mondrian"]))
+    print(f"  coverage by band (headline={headline}): "
+          + "  ".join(f"{b['band']}={b['coverage']*100:.0f}%" for b in r["coverage_by_band"]))
     print(f"  band exact / adjacent    : {r['band_exact']*100:.1f}% / {r['band_adjacent']*100:.1f}%")
     if r["aggregation_curve"]:
         c = r["aggregation_curve"]
@@ -483,11 +595,9 @@ def _print_summary(r: dict[str, Any]) -> None:
 
 
 def _append_results_md(path: str | Path, r: dict[str, Any], tuned: bool) -> None:
-    from datetime import datetime
-
     lines = [
-        f"\n## {datetime.now():%Y-%m-%d %H:%M} — improved model{' (tuned)' if tuned else ''}",
-        f"n_train={r['n_train']}, n_test={r['n_test']}, n_features={r['n_features']}",
+        f"\n## {current_commit_hash()} — improved model{' (tuned)' if tuned else ''}",
+        f"n_train={r['n_train']}, n_calib={r['n_calib']}, n_test={r['n_test']}, n_features={r['n_features']}",
         "",
         "| stage | MAE | RMSE |",
         "|---|---|---|",
@@ -496,13 +606,27 @@ def _append_results_md(path: str | Path, r: dict[str, Any], tuned: bool) -> None
     ]
     if "tuned_mae" in r:
         lines.append(f"| + tuned | {r['tuned_mae']:.1f} | {r['tuned_rmse']:.1f} |")
+    if r.get("best_params"):
+        # Persist the winning hyperparameters — the Optuna study lives only in this process.
+        lines.append(f"\n- best_params: `{r['best_params']}`")
     p, pp = r["point"], r["per_player"]
     lines += [
         "",
         f"- median AE {p['median_ae']:.0f}, R² {p['r2']:.3f}, Spearman {p['spearman']:.3f}, "
         f"within 100/200 Elo {p['within_100']*100:.0f}%/{p['within_200']*100:.0f}%, bias {p['bias']:+.1f}",
         f"- per-player (all games averaged): **{pp['mae']:.1f}** MAE over {pp['n_players']} players",
-        f"- 90% interval coverage: **{r['coverage']*100:.1f}%** (width {r['mean_interval_width']:.0f} Elo)",
+        f"- 90% interval coverage: raw {r['coverage_raw']*100:.1f}% -> CQR(plain) "
+        f"**{r['coverage_cqr_plain']*100:.1f}%** "
+        f"(width {r['mean_interval_width_raw']:.0f} -> {r['mean_interval_width_plain']:.0f} Elo; "
+        f"correction lo={r['conformal_correction'][0]:.1f}, hi={r['conformal_correction'][1]:.1f})",
+        f"- Mondrian CQR: **{r['coverage_cqr_mondrian']*100:.1f}%** "
+        f"(width {r['mean_interval_width_mondrian']:.0f} Elo)"
+        f"{' — headline' if r.get('mondrian_headline') else ''}",
+        "- coverage by band (headline=" + ("mondrian" if r.get("mondrian_headline") else "plain") + "): "
+        + ", ".join(f"{b['band']} {b['coverage']*100:.0f}%" for b in r["coverage_by_band"]),
+        "- per-band coverage, plain/Mondrian: " + ", ".join(
+            f"{pb['band']} {pb['coverage']*100:.0f}%/{mb['coverage']*100:.0f}%"
+            for pb, mb in zip(r["coverage_by_band_plain"], r["coverage_by_band_mondrian"])),
         f"- band accuracy: {r['band_exact']*100:.1f}% exact, {r['band_adjacent']*100:.1f}% adjacent",
     ]
     if r["aggregation_curve"]:
@@ -510,9 +634,7 @@ def _append_results_md(path: str | Path, r: dict[str, Any], tuned: bool) -> None
         lines.append(f"- aggregation MAE: {curve}")
     lines.append("- ablation (MAE↑ when dropped): "
                  + ", ".join(f"{a['group']} +{a['mae_increase']:.1f}" for a in r["ablations"]))
-    Path(path).parent.mkdir(parents=True, exist_ok=True)
-    with open(path, "a", encoding="utf-8") as fh:
-        fh.write("\n".join(lines) + "\n")
+    _append_md(path, lines)
 
 
 def main() -> None:
@@ -526,14 +648,17 @@ def main() -> None:
     parser.add_argument("--no-figures", action="store_true", help="skip figure generation")
     parser.add_argument("--tail-study", action="store_true",
                         help="only compare tail-bias corrections (plain vs reweighted vs de-shrink)")
-    parser.add_argument("--results-md", default=str(Path(cfg["paths"]["figures"]).parent / "results.md"))
+    parser.add_argument(
+        "--results-md", default=str(Path(cfg["paths"]["figures"]).parent / "results.md"),
+        help="path to append a run summary to (applies to --tail-study too); pass \"\" to skip logging",
+    )
     args = parser.parse_args()
 
     for label, path in (("features", args.features), ("games_clean", args.games)):
         if not Path(path).exists():
             raise SystemExit(f"{label} not found: {path}\nRun the earlier stages first.")
     if args.tail_study:
-        run_tail_study(cfg, args.features, args.games)
+        run_tail_study(cfg, args.features, args.games, results_md=(args.results_md or None))
         return
     run_evaluation(cfg, args.features, args.games, tune=args.tune,
                    make_figures=not args.no_figures, results_md=(args.results_md or None))
