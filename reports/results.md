@@ -154,3 +154,12 @@ n_train=329353, n_calib=59124, n_test=120513, n_features=77
 - band accuracy: 36.6% exact, 76.2% adjacent
 - aggregation MAE: K1=233, K2=208, K3=201, K5=198, K10=201, K20=216
 - ablation (MAE↑ when dropped): engine +33.6, clock +9.1, opening +8.2, style +7.9
+
+
+## 457c2a5 — tail study
+
+| variant | overall | tail | mid | 0-1200 | 1200-1400 | 1400-1600 | 1600-1800 | 1800-2000 | 2000-3000 |
+|---|---|---|---|---|---|---|---|---|---|
+| plain | 239.1 | 297 | 203 | 313 | 216 | 187 | 188 | 219 | 282 |
+| reweighted(s=0.5) | 240.0 | 306 | 198 | 315 | 208 | 179 | 184 | 221 | 296 |
+| deshrink(slope=0.96) | 239.5 | 305 | 198 | 322 | 214 | 181 | 182 | 215 | 288 |

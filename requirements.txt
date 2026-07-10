@@ -24,6 +24,11 @@ seaborn==0.13.2
 pyyaml==6.0.2            # loads config.yaml
 tqdm==4.67.1             # progress bars during the long ingest scan
 
+# --- Notebooks (Phase 3 presentation notebooks; run top-to-bottom, Restart & Run All) ---
+jupyter==1.1.1           # metapackage: notebook / lab frontend to run notebooks/*.ipynb
+nbformat==5.10.4         # read + schema-validate .ipynb files
+ipykernel==7.3.0         # Python kernel for the notebooks (also used by the VS Code Jupyter extension)
+
 # --- Dev ---
 pytest==8.3.3            # math regression tests + fixture smoke test
 
