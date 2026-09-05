@@ -5,6 +5,8 @@ models/
 *.pgn.zst
 *.zst
 *.parquet
+share_bundle/
+chess_rating_notebook_data.zip
 
 # --- Python ---
 __pycache__/

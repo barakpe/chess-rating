@@ -85,6 +85,23 @@ fixture:
 python -m src.ingest --input tests/fixtures/sample.pgn.zst --output data/processed/smoke.parquet
 ```
 
+#### Sharing data with a collaborator who only wants to run the notebooks
+
+Notebooks `01`–`05` need three processed parquets, and `games_clean_300k.parquet` (313 MB) is
+~95% raw `movetext` that the notebooks never read — they use column projections, and only
+notebook `02` parses a single game's PGN. `scripts/make_share_bundle.py` writes a bundle with the
+same filenames and every row and player intact, but `movetext` blanked outside a ~1,000-game
+keep-list (which includes every game notebook `02` could pick as its worked example):
+
+```bash
+python scripts/make_share_bundle.py            # -> share_bundle/  (~110 MB, was ~410 MB)
+```
+
+The receiver copies the three parquets into their own `data/processed/` and runs the notebooks —
+numbers match `reports/` exactly, because nothing is resampled. They do **not** need the raw dump.
+The bundle is *not* enough to re-run `python -m src.features`, which needs every game's movetext;
+that still requires the full `games_clean_300k.parquet`.
+
 ---
 
 ## Parquet schema contract — `blitz_sample.parquet`
