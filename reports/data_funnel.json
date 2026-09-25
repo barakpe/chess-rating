@@ -1,0 +1,29 @@
+{
+  "ingest": {
+    "input": "lichess_db_standard_rated_2025-05.pgn.zst",
+    "month": "2025-05",
+    "max_games_scanned": 15000000,
+    "sample_size": 300000,
+    "random_seed": 42,
+    "scan_window_utc": {
+      "first": "2025.05.01 00:00:06",
+      "last": "2025.05.05 21:06:40"
+    },
+    "scanned": 15000000,
+    "blitz": 6977568,
+    "candidate": 6939385,
+    "has_eval": 648594,
+    "clean": 647983,
+    "cohort": 6117,
+    "sampled": 300000
+  },
+  "clean": {
+    "sample": 300000,
+    "cohort": 6117,
+    "input": 306117,
+    "deduped": 303289,
+    "cleaned": 303289,
+    "instances": 606578,
+    "players": 251785
+  }
+}
