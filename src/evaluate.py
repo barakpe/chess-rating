@@ -241,24 +241,35 @@ def run_tail_study(
     fit_early_stopping(plain, train[full], y_tr, val[full], y_val, cfg)
     pred_plain = plain.predict(test[full])
 
-    weights = band_sample_weights(y_tr, bands, cfg["model"]["balance_strength"])
+    # Up-weight rare ratings: inverse frequency over FINE rating bins. (The six confusion bands would
+    # do the opposite — the two outer bands are the largest, so they would get the smallest weights.)
+    width = cfg["model"].get("reweight_bin_width", 100)
+    fine_edges = list(np.arange(0, (np.ceil(max(y_tr.max(), y_te.max()) / width) + 1) * width + 1, width))
+    weights = band_sample_weights(y_tr, fine_edges, cfg["model"]["balance_strength"])
     weighted = make_point_model(cfg)
     fit_early_stopping(weighted, train[full], y_tr, val[full], y_val, cfg, sample_weight=weights)
     pred_weighted = weighted.predict(test[full])
+    band_idx = to_bands(y_tr, bands)
+    mean_weight = {label: float(weights[band_idx == b].mean())
+                   for b, label in enumerate(band_labels(bands)) if (band_idx == b).any()}
 
-    # de-shrink is fit on CALIB (never seen by early stopping) so the correction isn't tuned on
-    # the same data the model used to pick its stopping point.
+    # The linear map true ~ pred is fit on CALIB (never seen by early stopping). A slope > 1 would
+    # stretch ("de-shrink") the predictions; a slope <= 1 means there is no leftover shrinkage.
     coef = fit_deshrink(plain.predict(calib[full]), y_cal)
     pred_deshrink = apply_deshrink(pred_plain, coef)
 
     variants = {
         "plain": _band_mae_table(y_te, pred_plain, bands),
-        f"reweighted(s={cfg['model']['balance_strength']})": _band_mae_table(y_te, pred_weighted, bands),
+        f"reweighted({width}-Elo bins, s={cfg['model']['balance_strength']})": _band_mae_table(y_te, pred_weighted, bands),
         f"deshrink(slope={coef[0]:.2f})": _band_mae_table(y_te, pred_deshrink, bands),
     }
     _print_tail_study(variants, bands)
+    print("  mean training weight by band (reweighted): "
+          + ", ".join(f"{k} {v:.2f}" for k, v in mean_weight.items()))
     if results_md is not None:
         _append_tail_study_md(results_md, variants, bands)
+        _append_md(results_md, ["- reweighted: mean training weight by band: "
+                                + ", ".join(f"{k} {v:.2f}" for k, v in mean_weight.items())])
     return variants
 
 

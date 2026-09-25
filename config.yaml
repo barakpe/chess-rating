@@ -6,8 +6,8 @@ month: "2025-05"                 # a COMPLETE month; must exist on https://datab
 time_control: "blitz"            # human label; the real filter is blitz_estimate_seconds below
 blitz_estimate_seconds: [180, 479]   # keep if (base + 40*inc) is in this inclusive range
                                      # (scalachess Speed ranges: Blitz = 180..479s)
-use_stored_evals: true           # only keep games that already carry a stored [%eval] (Stockfish
-                                  # analysis players requested on Lichess) rather than computing
+use_stored_evals: true           # only keep games that already carry stored [%eval] annotations
+                                  # (games analysed with Stockfish on Lichess) rather than computing
                                   # our own evals from scratch
 
 # --- Sampling ---
@@ -40,7 +40,7 @@ eval:
 # --- Game-phase boundaries (pragmatic) ---
 phases:
   opening_max_ply: 30            # plies 1-30 (~15 full moves) count as the opening
-  endgame_nonpawn_pieces: 6      # middlegame -> endgame when total non-pawn pieces (both sides) <= this
+  endgame_nonpawn_pieces: 6      # middlegame -> endgame when non-pawn, non-king pieces (both sides) <= this
 
 # --- Cleaning (Stage 2) ---
 clean:
@@ -69,6 +69,9 @@ model:
                                  # band; plain CQR is always computed alongside for comparison
   mondrian_min_calib: 200        # predicted bands with fewer calib scores fall back to the global correction
   balance_strength: 0.5          # tail-study reweighting exponent (0=uniform, 1=full inverse-frequency)
+  reweight_bin_width: 100        # tail-study reweighting uses rating-frequency in bins of this width
+                                 # (Elo). Not the 6 confusion bands: the two outer bands are the
+                                 # LARGEST, so weighting by band frequency would down-weight the tails.
   lgbm:
     n_estimators: 3000           # upper bound; early stopping picks the real count
     learning_rate: 0.03
