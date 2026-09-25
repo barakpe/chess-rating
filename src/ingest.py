@@ -17,9 +17,9 @@ decompressed. ``stream_game_chunks`` splits the text stream into (headers, movet
 without building any chess.pgn object; cheap string/regex prefilters (mirroring the real
 TimeControl/Termination/bot/eval checks) reject most games from that raw text alone. Only
 games surviving the prefilters get a full ``chess.pgn.read_game`` SAN parse and the
-authoritative header/eval/min-plies checks. This matters because only ~10% of blitz candidates
+authoritative header/eval/min-plies checks. This matters because only ~9% of blitz candidates
 (non-bot, normal/time-forfeit termination) carry a stored ``[%eval]`` — skipping the SAN parse
-for the other ~90% is where nearly all of the win comes from. The exact counts of every run
+for the other ~91% is where nearly all of the win comes from. The exact counts of every run
 are written to ``reports/data_funnel.json`` (see ``write_funnel``).
 """
 
@@ -401,7 +401,7 @@ def run_ingest(
             continue
         funnel["candidate"] += 1
 
-        # Gate the expensive SAN parse on the eval substring: ~90% of candidates lack a stored
+        # Gate the expensive SAN parse on the eval substring: ~91% of candidates lack a stored
         # eval and would be rejected by has_eval() right after parsing anyway -- this is where
         # nearly all of the speedup comes from.
         if require_eval and not string_has_eval_hint(movetext_text):
