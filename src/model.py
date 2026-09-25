@@ -306,7 +306,8 @@ def band_sample_weights(ratings: np.ndarray, bands: list[int], strength: float =
 
     The natural rating distribution is bell-shaped, so an MAE learner shrinks the tails toward the
     centre. Weighting each instance by ``(1 / band_frequency) ** strength`` makes the model value
-    the tails more, trading a little central accuracy for less tail bias. ``strength=0`` -> uniform.
+    rare ratings more. Use FINE bins (the tail study uses 100-Elo bins): with wide bands whose outer
+    bands are large, this would down-weight the tails instead. ``strength=0`` -> uniform.
     """
     idx = to_bands(ratings, bands)
     counts = np.bincount(idx, minlength=len(bands) - 1).astype(float)
