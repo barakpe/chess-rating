@@ -2,7 +2,7 @@
 # Every script reads this file (via src/config.py). No magic numbers in code.
 
 # --- Data selection ---
-month: "2025-05"                 # a recent COMPLETE month; must exist on https://database.lichess.org/
+month: "2025-05"                 # a COMPLETE month; must exist on https://database.lichess.org/
 time_control: "blitz"            # human label; the real filter is blitz_estimate_seconds below
 blitz_estimate_seconds: [180, 479]   # keep if (base + 40*inc) is in this inclusive range
                                      # (scalachess Speed ranges: Blitz = 180..479s)
@@ -11,42 +11,40 @@ use_stored_evals: true           # only keep games that already carry a stored [
                                   # our own evals from scratch
 
 # --- Sampling ---
-sample_size: 300000              # bump up on a stronger machine
-max_games_scanned: null          # cap the raw stream for fast prototyping (null = whole file)
+sample_size: 300000              # reservoir-sample size (games)
+max_games_scanned: 15000000      # scan budget: stop after the FIRST 15M games of the dump. The dump
+                                 # is chronological, so for 2025-05 this covers May 1-5 (UTC); the
+                                 # exact window is written to reports/data_funnel.json. null = whole file.
 random_seed: 42                  # fix everywhere for reproducibility
-player_cohort:                   # ALSO keep every game of a hash-sampled player subset (separate
-  enabled: true                  # parquet) so the aggregation curve gets players with many games
-  hash_rate: 0.005               # P(username in cohort) via a stable hash of the username
+player_cohort:                   # ALSO keep every in-window game of a hash-sampled player subset, so
+  enabled: true                  # the modelling data contains players with many games. src.clean
+  hash_rate: 0.005               # unions it with the reservoir sample (dedup on game_id).
   max_games: 100000              # safety cap on cohort rows held in memory
 
 # --- Cleaning / filtering ---
 min_plies: 10                    # drop aborted / ultra-short games
-drop_provisional: true           # NOTE: NOT implementable from the dump — provisional status is
-                                 # stripped from exported PGN. Kept as a documented no-op so the
-                                 # intent is recorded; see README "Limitations". Do not rely on it.
 exclude_bots: true               # drop games with WhiteTitle/BlackTitle == "BOT"
 keep_terminations: ["Normal", "Time forfeit"]
-                                 # allowlist: only the two Termination strings confirmed from official
-                                 # Lichess samples. "Abandoned" / "Rules infraction" are dropped by
-                                 # exclusion. TODO: verify exact spellings against a real dump.
+                                 # allowlist of Lichess Termination header values. Everything else
+                                 # ("Abandoned", "Rules infraction", "Unterminated") is dropped.
 
 # --- Labels / evaluation buckets ---
-rating_bands: [0, 1200, 1400, 1600, 1800, 2000, 3000]   # for the derived-band confusion matrix
+rating_bands: [0, 1200, 1400, 1600, 1800, 2000, 3000]   # band edges; the last band is open-ended
+                                                         # (ratings >= 2000, incl. the few >= 3000)
 
 # --- Eval handling (Win% / centipawn math) ---
 eval:
-  cp_clamp: 1000                 # clamp centipawns to +/- this before Win% (matches Lichess)
-  mate_score: 100000             # fold mate into a large cp value for raw features
-  start_cp: 15                   # Cp.initial: assumed eval of the start position (first "before")
+  cp_clamp: 1000                 # clamp centipawns (and fold forced mates) to +/- this, as Lichess does
+  start_cp: 15                   # assumed eval of the start position (the first move's "before")
 
-# --- Game-phase boundaries (pragmatic; tune later) ---
+# --- Game-phase boundaries (pragmatic) ---
 phases:
-  opening_max_ply: 30            # ~15 full moves; opening lasts until out of book or this ply
+  opening_max_ply: 30            # plies 1-30 (~15 full moves) count as the opening
   endgame_nonpawn_pieces: 6      # middlegame -> endgame when total non-pawn pieces (both sides) <= this
 
 # --- Cleaning (Stage 2) ---
 clean:
-  min_rating: 400                # drop implausible/corrupt Elo labels below this
+  min_rating: 400                # drop implausible/corrupt rating labels below this
   max_rating: 4000               # ...or above this (Lichess blitz tops out ~3100)
 
 # --- Feature engineering (Stage 4) ---
@@ -61,28 +59,31 @@ features:
 model:
   test_size: 0.2                 # grouped hold-out fraction (split by username, never by game)
   val_size: 0.2                  # grouped validation fraction (carved from train) for early stopping
-  calib_size: 0.15               # grouped conformal-calibration fraction (carved from train after val)
+  calib_size: 0.15               # grouped calibration fraction (carved from train after val); used only
+                                 # by post-hoc steps (conformal correction, aggregate recalibration)
   ridge_alpha: 10.0
   early_stopping_rounds: 50
   quantiles: [0.05, 0.5, 0.95]   # lower / median / upper -> a 90% prediction interval
   cqr_two_sided: false           # CQR: one symmetric correction (false) or per-side alpha/2 (true)
-  mondrian_cqr: true             # band-conditional (Mondrian) CQR by PREDICTED-median band is the
-                                 # headline interval; plain CQR always computed alongside for comparison
-  mondrian_min_calib: 200        # predicted-bands with fewer calib scores fall back to the global correction
-  balance_strength: 0.5          # tail reweighting exponent (0=uniform, 1=full inverse-frequency)
+  mondrian_cqr: true             # headline interval = band-conditional (Mondrian) CQR by PREDICTED-median
+                                 # band; plain CQR is always computed alongside for comparison
+  mondrian_min_calib: 200        # predicted bands with fewer calib scores fall back to the global correction
+  balance_strength: 0.5          # tail-study reweighting exponent (0=uniform, 1=full inverse-frequency)
   lgbm:
     n_estimators: 3000           # upper bound; early stopping picks the real count
     learning_rate: 0.03
     num_leaves: 63
-  tune:
-    enabled: false               # Optuna hyperparameter search (opt-in via --tune)
+  tune:                          # Optuna search, opt-in via `python -m src.evaluate --tune`
     n_trials: 25
     cv_folds: 3                  # GroupKFold folds inside the Optuna objective
 
 # --- Evaluation & error analysis (Stages 7-8) ---
 evaluate:
-  aggregation_k: [1, 2, 3, 5, 10, 20]      # games-per-player for the aggregation curve
+  aggregation_k: [1, 2, 3, 5, 10, 20]      # games-per-player for the (shifting-cohort) aggregation curve
   aggregation_min_players: 30    # only report a K if >= this many players have >= K test games
+  matched_k: [1, 2, 3, 5, 10]    # matched curve: the SAME players (>= max K games) at every K
+  matched_draws: 40              # random K-subsets averaged per player in the matched curve
+  bootstrap_reps: 1000           # player-clustered bootstrap replicates for confidence intervals
   calibration_bins: 10
   error_analysis_top_n: 20       # largest-residual games to inspect
   shap_max_display: 15           # features shown in the SHAP summary
@@ -94,8 +95,12 @@ paths:
   figures: reports/figures
 
 outputs:
-  blitz_sample: data/processed/blitz_sample.parquet   # Stage 1 (ingest)
-  games_clean: data/processed/games_clean.parquet     # Stage 2 (clean/dedup)
+  blitz_sample: data/processed/blitz_sample.parquet   # Stage 1 (ingest, reservoir sample)
+  player_cohort: data/processed/player_cohort.parquet # Stage 1 (ingest, player-cohort sample)
+  games_clean: data/processed/games_clean.parquet     # Stage 2 (sample + cohort, deduped + cleaned)
   instances: data/processed/instances.parquet         # Stage 3 (2 rows/game, per-player labels)
   features: data/processed/features.parquet           # Stage 4 (per-player feature vectors)
-  player_cohort: data/processed/player_cohort.parquet # Stage 1b (player-cohort sample; aggregation curve)
+  data_funnel: reports/data_funnel.json               # Stages 1-3 funnel counts + scan window
+  results_log: reports/results.md                     # append-only experiment log
+  eval_artifacts: reports/eval_artifacts.json         # Stage 7-8 structured results (read by notebooks)
+  largest_residuals: reports/largest_residuals.csv    # Stage 8 worst single-game misses

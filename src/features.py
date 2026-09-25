@@ -130,8 +130,8 @@ def game_phase(ply: int, board: Any, cfg: dict[str, Any]) -> str:
     """Return 'opening' / 'middlegame' / 'endgame' for a position.
 
     Pragmatic boundaries from ``cfg['phases']``:
-      * opening: up to ``opening_max_ply`` (proxy for "until out of book" — real book-exit
-        detection via ``opening_ply`` is a feature-stage refinement).
+      * opening: plies 1..``opening_max_ply`` — a fixed ply cut-off, not an opening-book lookup
+        (so ``acc_after_book`` below means "accuracy after the opening plies").
       * endgame: once total non-pawn pieces (both sides) <= ``endgame_nonpawn_pieces``.
       * middlegame: everything in between.
     """
@@ -321,6 +321,7 @@ def extract_player_features(
     feats["has_endgame"] = int(feats["endgame_n_moves"] > 0)
     feats["has_clock"] = int(len(move_times) > 0)
 
+    # "After book" = after the opening ply cut-off (the name is historical; no book lookup).
     after_book = [r["accuracy"] for r in quality if r["ply"] > opening_max_ply]
     feats["acc_after_book"] = statistics.fmean(after_book) if after_book else _NAN
 

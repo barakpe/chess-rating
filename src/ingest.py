@@ -17,9 +17,10 @@ decompressed. ``stream_game_chunks`` splits the text stream into (headers, movet
 without building any chess.pgn object; cheap string/regex prefilters (mirroring the real
 TimeControl/Termination/bot/eval checks) reject most games from that raw text alone. Only
 games surviving the prefilters get a full ``chess.pgn.read_game`` SAN parse and the
-authoritative header/eval/min-plies checks. This matters because ~1/3 of games are blitz +
-non-bot + termination-ok, but ~94% of those lack stored ``[%eval]`` — skipping the SAN parse
-for that 94% is where nearly all of the win comes from.
+authoritative header/eval/min-plies checks. This matters because only ~10% of blitz candidates
+(non-bot, normal/time-forfeit termination) carry a stored ``[%eval]`` — skipping the SAN parse
+for the other ~90% is where nearly all of the win comes from. The exact counts of every run
+are written to ``reports/data_funnel.json`` (see ``write_funnel``).
 """
 
 from __future__ import annotations
@@ -27,6 +28,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import io
+import json
 import random
 import re
 from pathlib import Path
@@ -141,6 +143,18 @@ def stream_game_chunks(path: str | Path) -> Iterator[tuple[str, str]]:
 # the first would let this mirror reject a game the authoritative parse would accept.
 _TIME_CONTROL_RE = re.compile(r'^\[TimeControl "([^\r\n]*)"\]\s*$', re.MULTILINE)
 _TERMINATION_RE = re.compile(r'^\[Termination "([^\r\n]*)"\]\s*$', re.MULTILINE)
+_UTC_DATE_RE = re.compile(r'^\[UTCDate "([^\r\n]*)"\]\s*$', re.MULTILINE)
+_UTC_TIME_RE = re.compile(r'^\[UTCTime "([^\r\n]*)"\]\s*$', re.MULTILINE)
+
+
+def header_timestamp(headers_text: str | None) -> str | None:
+    """``"YYYY.MM.DD HH:MM:SS"`` from a raw header block (UTCDate + UTCTime), or None."""
+    if not headers_text:
+        return None
+    dates, times = _UTC_DATE_RE.findall(headers_text), _UTC_TIME_RE.findall(headers_text)
+    if not dates:
+        return None
+    return f"{dates[-1]} {times[-1]}" if times else dates[-1]
 
 
 def string_is_blitz(headers_text: str, lo: int, hi: int) -> bool:
@@ -185,7 +199,7 @@ def string_candidate_ok(
 
 
 # --------------------------------------------------------------------------------------
-# Filters (see verified facts in PROJECT_ARCHITECTURE.md / plan)
+# Filters — the authoritative checks, run on the parsed game
 # --------------------------------------------------------------------------------------
 def estimate_seconds(time_control: str | None) -> int | None:
     """Lichess estimated game duration = base + 40 * increment (seconds). None if no clock."""
@@ -316,8 +330,12 @@ def run_ingest(
     output_path: str | Path,
     cfg: dict[str, Any],
     cohort_output_path: str | Path | None = None,
+    funnel_path: str | Path | None = None,
 ) -> dict[str, int]:
     """Stream -> filter -> reservoir-sample -> parquet. Returns the data-funnel counts.
+
+    ``funnel_path`` (optional): merge the counts plus the scanned UTC window into this JSON file
+    under the ``"ingest"`` key (see ``write_funnel``).
 
     When ``cfg["player_cohort"]["enabled"]`` and ``cohort_output_path`` is given, ALSO writes a
     second parquet (same ``INGEST_COLUMNS`` schema) holding every filtered game of a small
@@ -355,10 +373,18 @@ def run_ingest(
     def should_stop() -> bool:
         return max_scanned is not None and funnel["scanned"] >= max_scanned
 
+    # First/last scanned game's UTC timestamp: the dump is chronological, so a scan budget
+    # (max_games_scanned) covers a contiguous window at the START of the month, not all of it.
+    first_headers: str | None = None
+    last_headers: str | None = None
+
     pbar = tqdm(desc="scanning games", unit="game")
     for headers_text, movetext_text in stream_game_chunks(input_path):
         funnel["scanned"] += 1
         pbar.update(1)
+        if first_headers is None:
+            first_headers = headers_text
+        last_headers = headers_text
 
         if string_is_blitz(headers_text, lo, hi):
             funnel["blitz"] += 1
@@ -375,7 +401,7 @@ def run_ingest(
             continue
         funnel["candidate"] += 1
 
-        # Gate the expensive SAN parse on the eval substring: ~94% of candidates lack a stored
+        # Gate the expensive SAN parse on the eval substring: ~90% of candidates lack a stored
         # eval and would be rejected by has_eval() right after parsing anyway -- this is where
         # nearly all of the speedup comes from.
         if require_eval and not string_has_eval_hint(movetext_text):
@@ -442,7 +468,33 @@ def run_ingest(
     if cohort_active:
         _write_parquet(cohort_rows, cohort_output_path)
     _print_funnel(funnel, output_path, cohort_output_path if cohort_active else None)
+    if funnel_path is not None:
+        write_funnel(funnel_path, "ingest", {
+            "input": Path(input_path).name,
+            "month": cfg.get("month"),
+            "max_games_scanned": cfg.get("max_games_scanned"),
+            "sample_size": cfg["sample_size"],
+            "random_seed": cfg["random_seed"],
+            "scan_window_utc": {"first": header_timestamp(first_headers),
+                                "last": header_timestamp(last_headers)},
+            **funnel,
+        })
     return funnel
+
+
+def write_funnel(path: str | Path, stage: str, record: dict[str, Any]) -> None:
+    """Merge one stage's funnel ``record`` into the JSON file at ``path`` under key ``stage``.
+
+    Ingest and clean each own one key, so re-running one stage never erases the other's counts.
+    The notebooks read this file instead of hand-typing the funnel.
+    """
+    path = Path(path)
+    data: dict[str, Any] = {}
+    if path.exists():
+        data = json.loads(path.read_text(encoding="utf-8"))
+    data[stage] = record
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
 
 
 def _write_parquet(rows: list[dict[str, Any]], output_path: str | Path) -> None:
@@ -490,6 +542,8 @@ def main() -> None:
     )
     parser.add_argument("--sample-size", type=int, default=None, help="override config sample_size")
     parser.add_argument("--max-games", type=int, default=None, help="override config max_games_scanned")
+    parser.add_argument("--funnel", default=cfg["outputs"]["data_funnel"],
+                        help="JSON file to record the funnel counts in (use '' to skip)")
     args = parser.parse_args()
 
     if args.sample_size is not None:
@@ -504,7 +558,8 @@ def main() -> None:
             f"Download lichess_db_standard_rated_{cfg['month']}.pgn.zst from "
             f"https://database.lichess.org/ into {cfg['paths']['raw']}, or pass --input."
         )
-    run_ingest(input_path, args.output, cfg, cohort_output_path=args.cohort_output)
+    run_ingest(input_path, args.output, cfg, cohort_output_path=args.cohort_output,
+               funnel_path=(args.funnel or None))
 
 
 if __name__ == "__main__":

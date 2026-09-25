@@ -91,3 +91,38 @@ def test_run_clean_writes_both_parquets(tmp_path):
     assert funnel["cleaned"] == 2 and funnel["instances"] == 4
     assert pd.read_parquet(games_out).shape[0] == 2
     assert list(pd.read_parquet(inst_out).columns) == INSTANCE_COLUMNS
+
+
+def test_union_with_cohort_then_clean_keeps_sample_first():
+    from src.clean import union_with_cohort
+
+    cfg = load_config()
+    sample = _frame([_game("g1", "a", "b", 1500, 1500), _game("g2", "c", "d", 1600, 1600)])
+    cohort = _frame([_game("g2", "c", "d", 1600, 1600), _game("g3", "e", "f", 1700, 1700)])
+    u = union_with_cohort(sample, cohort)
+    assert list(u["game_id"]) == ["g1", "g2", "g2", "g3"]          # plain append, sample first
+    clean_df, funnel = clean_games(u, cfg)
+    assert list(clean_df["game_id"]) == ["g1", "g2", "g3"]          # the cohort's copy of g2 is dropped
+    assert funnel["input"] - funnel["deduped"] == 1                 # overlap visible in the funnel
+    assert list(union_with_cohort(sample, None)["game_id"]) == ["g1", "g2"]
+
+
+def test_run_clean_with_cohort_writes_funnel(tmp_path):
+    import json
+
+    from src.clean import run_clean
+
+    cfg = load_config()
+    sample_p, cohort_p = tmp_path / "s.parquet", tmp_path / "c.parquet"
+    _frame([_game("g1", "a", "b", 1500, 1500), _game("g2", "c", "d", 1600, 1600, n_plies=4)]).to_parquet(sample_p)
+    _frame([_game("g1", "a", "b", 1500, 1500), _game("g3", "e", "f", 1700, 1700)]).to_parquet(cohort_p)
+    funnel_p = tmp_path / "funnel.json"
+
+    funnel = run_clean(sample_p, tmp_path / "gc.parquet", tmp_path / "inst.parquet", cfg,
+                       cohort_path=cohort_p, funnel_path=funnel_p)
+
+    assert funnel["sample"] == 2 and funnel["cohort"] == 2
+    assert funnel["input"] == 4 and funnel["deduped"] == 3        # g1 in both -> kept once
+    assert funnel["cleaned"] == 2                                 # g2 dropped (< min_plies)
+    assert funnel["instances"] == 4 and funnel["players"] == 4
+    assert json.loads(funnel_p.read_text(encoding="utf-8"))["clean"] == funnel

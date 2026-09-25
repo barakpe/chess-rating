@@ -313,3 +313,28 @@ def test_prefilter_end_to_end_via_run_ingest(tmp_path):
     assert funnel["clean"] == 1
     df = pd.read_parquet(out)
     assert list(df["game_id"]) == ["https://lichess.org/prefiltergood"]
+
+
+def test_ingest_writes_funnel_json_with_scan_window(tmp_path):
+    import json
+
+    out = tmp_path / "blitz_sample.parquet"
+    funnel_path = tmp_path / "data_funnel.json"
+    funnel = run_ingest(FIXTURE, out, _cfg(), funnel_path=funnel_path)
+
+    data = json.loads(funnel_path.read_text(encoding="utf-8"))
+    rec = data["ingest"]
+    for key, value in funnel.items():
+        assert rec[key] == value                     # same counts as the returned funnel
+    assert rec["input"] == FIXTURE.name
+    assert rec["scan_window_utc"]["first"].startswith("2025.05.01")
+    assert rec["scan_window_utc"]["last"] is not None
+
+
+def test_header_timestamp():
+    from src.ingest import header_timestamp
+
+    headers = '[Event "x"]\n[UTCDate "2025.05.03"]\n[UTCTime "07:08:09"]\n'
+    assert header_timestamp(headers) == "2025.05.03 07:08:09"
+    assert header_timestamp('[Event "x"]\n') is None
+    assert header_timestamp(None) is None
