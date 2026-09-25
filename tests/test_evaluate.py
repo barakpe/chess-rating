@@ -13,7 +13,15 @@ import pandas as pd  # noqa: E402
 from src.config import load_config  # noqa: E402
 from src.evaluate import (  # noqa: E402
     _coverage_by_band,
+    _residual_by_length,
+    aggregate_band_table,
     aggregation_curve,
+    cluster_bootstrap_mae,
+    fit_aggregate_recalibration,
+    matched_aggregation,
+    partner_exposure,
+    prior_interval,
+    scramble_columns,
     apply_deshrink,
     band_accuracy,
     feature_groups,
@@ -163,7 +171,9 @@ def test_run_evaluation_end_to_end(tmp_path):
     cfg["evaluate"]["aggregation_k"] = [1, 2]
     fp, gp = _synthetic_parquets(tmp_path)
 
-    r = run_evaluation(cfg, fp, gp, tune=False, make_figures=False, results_md=None)
+    art, csv = tmp_path / "eval_artifacts.json", tmp_path / "largest_residuals.csv"
+    r = run_evaluation(cfg, fp, gp, tune=False, make_figures=False, results_md=None,
+                       artifacts_path=art, residuals_csv=csv)
 
     assert np.isfinite(r["baseline_mae"]) and np.isfinite(r["full_mae"])
     assert r["n_calib"] > 0
@@ -197,6 +207,24 @@ def test_run_evaluation_end_to_end(tmp_path):
     assert r["mean_interval_width"] == pytest.approx(r["mean_interval_width_mondrian"])
     assert r["coverage_by_band"] == r["coverage_by_band_mondrian"]
 
+    # --- new diagnostics are present and well-formed ---
+    assert set(r["partner_check"]) >= {"n_seen", "n_unseen", "mae_seen", "mae_unseen"}
+    assert r["partner_check"]["n_seen"] + r["partner_check"]["n_unseen"] == r["n_test"]
+    assert 0.0 <= r["prior_interval"]["coverage"] <= 1.0
+    assert "baseline - full" in r["bootstrap"]
+    diag = r["mondrian_diagnostics"]
+    assert sum(map(sum, diag["test_true_by_predicted_band"])) == r["n_test"]
+    assert sum(diag["calib_rows_by_predicted_band"]) == r["n_calib"]
+
+    # --- the notebook-facing artifacts are written and loadable; no usernames in the CSV ---
+    import json
+    a = json.loads(art.read_text(encoding="utf-8"))
+    for key in ("full_mae", "baseline_mae", "point", "coverage_cqr_plain", "aggregation_curve",
+                "residual_by_band", "ablations", "mondrian_corrections", "source_commit"):
+        assert key in a
+    lr = pd.read_csv(csv)
+    assert "username" not in lr.columns and len(lr) > 0
+
 
 def test_run_tail_study_smoke(tmp_path):
     cfg = load_config()
@@ -215,3 +243,83 @@ def test_run_tail_study_smoke(tmp_path):
     assert "tail study" in text
     for name in variants:
         assert name in text
+
+
+def test_cluster_bootstrap_mae_ci_and_paired_diff():
+    rng = np.random.RandomState(0)
+    groups = np.repeat(np.arange(200), 3)
+    err_a = np.abs(rng.normal(0, 100, len(groups)))
+    ci = cluster_bootstrap_mae({"a": err_a, "b": err_a.copy(), "c": err_a + 10}, groups, 200, 0,
+                               diffs=[("a", "b"), ("c", "a")])
+    assert ci["a"]["lo"] <= ci["a"]["mae"] <= ci["a"]["hi"]
+    assert ci["a - b"]["diff"] == pytest.approx(0.0) and ci["a - b"]["lo"] == pytest.approx(0.0)
+    assert ci["c - a"]["lo"] == pytest.approx(10.0) and ci["c - a"]["hi"] == pytest.approx(10.0)
+
+
+def test_cluster_bootstrap_mae_masks():
+    groups = np.array([0, 0, 1, 1])
+    err = np.array([1.0, 3.0, 5.0, 7.0])
+    mask = np.array([True, False, True, False])
+    ci = cluster_bootstrap_mae({"all": err, "sub": err}, groups, 50, 0, masks={"sub": mask})
+    assert ci["all"]["mae"] == pytest.approx(4.0)
+    assert ci["sub"]["mae"] == pytest.approx(3.0)       # mean of rows 0 and 2
+
+
+def _shrunk_players(n_players, games, seed, shrink=0.5, noise=300.0):
+    """Players whose single-game prediction is a calibrated-but-shrunk estimate:
+    pred = m + shrink * (rating + noise - m). Averaging such predictions keeps the shrinkage."""
+    rng = np.random.RandomState(seed)
+    rows = []
+    for u in range(n_players):
+        r = rng.normal(1600, 400)
+        for _ in range(games):
+            rows.append({"username": f"u{seed}_{u}", "rating": r,
+                         "pred": 1600 + shrink * (r + rng.normal(0, noise) - 1600)})
+    return pd.DataFrame(rows)
+
+
+def test_aggregate_recalibration_undoes_averaged_shrinkage():
+    calib, test = _shrunk_players(400, 10, 1), _shrunk_players(400, 10, 2)
+    players = [(g["rating"].to_numpy(), g["pred"].to_numpy()) for _, g in calib.groupby("username")]
+    slope1, _ = fit_aggregate_recalibration(players, 1, 5, 0)
+    slope10, _ = fit_aggregate_recalibration(players, 10, 1, 0)
+    assert slope10 > slope1 > 1.0                          # averaged preds are MORE under-dispersed
+
+    curve = matched_aggregation(test, calib, [1, 5, 10], draws=5, seed=0)
+    assert [c["k"] for c in curve] == [1, 5, 10]
+    k10 = curve[-1]
+    assert k10["recal_mae"] < 0.6 * k10["naive_mae"]       # recalibration removes most of the bias
+    assert curve[0]["naive_mae"] > k10["naive_mae"]        # averaging still helps the naive estimate
+
+    table = aggregate_band_table(test, calib, 5, [0, 1400, 1800, 3000], draws=5, seed=0, reps=50)
+    low, high = table["bands"][0], table["bands"][-1]
+    assert low["naive_bias"] > 100 and high["naive_bias"] < -100          # shrinkage survives averaging
+    assert abs(low["recal_bias"]) < abs(low["naive_bias"]) / 2
+    assert abs(high["recal_bias"]) < abs(high["naive_bias"]) / 2
+    assert table["naive_minus_recal_ci"]["lo"] > 0
+
+
+def test_matched_aggregation_empty_when_no_player_has_enough_games():
+    df = _shrunk_players(10, 3, 0)
+    assert matched_aggregation(df, df, [1, 5], draws=2, seed=0) == []
+    assert aggregate_band_table(df, df, 5, [0, 1600, 3000], draws=2, seed=0) == {}
+    # enough games, but fewer players than min_players -> not reported
+    df10 = _shrunk_players(10, 10, 0)
+    assert matched_aggregation(df10, df10, [1, 5], draws=2, seed=0, min_players=30) == []
+    assert aggregate_band_table(df10, df10, 5, [0, 1600, 3000], draws=2, seed=0, min_players=30) == {}
+
+
+def test_partner_exposure_and_prior_interval_and_helpers():
+    test = pd.DataFrame({"game_id": ["g1", "g2", "g3"]})
+    assert list(partner_exposure(test, {"g2", "g9"})) == [False, True, False]
+
+    pi = prior_interval(np.arange(1, 101), np.array([0, 50, 200]), [0.05, 0.5, 0.95])
+    assert pi["lower"] == pytest.approx(5.95) and pi["upper"] == pytest.approx(95.05)
+    assert pi["coverage"] == pytest.approx(1 / 3)
+
+    cols = scramble_columns(["cpl_mean", "scramble_cpl_mean", "has_scramble"])
+    assert cols == ["scramble_cpl_mean", "has_scramble"]
+
+    rows = _residual_by_length(np.array([10, 25, 25, 80]), np.array([100.0, -50.0, 50.0, 10.0]))
+    assert [r["moves"] for r in rows] == ["0-19", "20-29", "60+"]
+    assert rows[1]["mae"] == pytest.approx(50.0) and rows[1]["mean_residual"] == pytest.approx(0.0)
