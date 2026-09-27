@@ -87,9 +87,22 @@ evaluate:
   matched_k: [1, 2, 3, 5, 10]    # matched curve: the SAME players (>= max K games) at every K
   matched_draws: 40              # random K-subsets averaged per player in the matched curve
   bootstrap_reps: 1000           # player-clustered bootstrap replicates for confidence intervals
+  one_game_draws: 20             # CQR with one random game per player: random draws averaged
   calibration_bins: 10
   error_analysis_top_n: 20       # largest-residual games to inspect
   shap_max_display: 15           # features shown in the SHAP summary
+
+# --- Confirmatory hold-out (src/holdout.py; protocol: reports/HOLDOUT_PROTOCOL.md) ---
+holdout:
+  utc_date: "2025.05.31"         # every eligible game of this UTC day; the development data is May 1-5
+  tuned_params:                  # the 'tuned' row's hyperparameters: the Optuna result logged in
+    num_leaves: 211              # reports/results.md (1b83f3f), frozen here for the hold-out
+    learning_rate: 0.010060300707949244
+    feature_fraction: 0.5019379341956828
+    bagging_fraction: 0.8531334621899735
+    bagging_freq: 1
+    min_child_samples: 89
+    reg_lambda: 2.7159108131066168
 
 # --- Paths ---
 paths:
@@ -106,4 +119,8 @@ outputs:
   data_funnel: reports/data_funnel.json               # Stages 1-3 funnel counts + scan window
   results_log: reports/results.md                     # append-only experiment log
   eval_artifacts: reports/eval_artifacts.json         # Stage 7-8 structured results (read by notebooks)
-  largest_residuals: reports/largest_residuals.csv    # Stage 8 worst single-game misses
+  largest_residuals: reports/largest_residuals.csv    # Stage 8 worst single-game misses (no identifiers)
+  holdout_games: data/processed/holdout_games.parquet # hold-out day, every eligible game (src.holdout)
+  holdout_games_clean: data/processed/holdout_games_clean.parquet  # ...cleaned, games with a new player
+  holdout_features: data/processed/holdout_features.parquet        # ...feature rows of new players only
+  holdout_results: reports/holdout_results.json       # the one confirmatory scoring

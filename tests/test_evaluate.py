@@ -19,6 +19,8 @@ from src.evaluate import (  # noqa: E402
     cluster_bootstrap_mae,
     fit_aggregate_recalibration,
     matched_aggregation,
+    one_game_per_player_cqr,
+    slope_bootstrap_ci,
     partner_exposure,
     prior_interval,
     scramble_columns,
@@ -145,7 +147,7 @@ def _synthetic_parquets(tmp_path, n_games=150, n_players=48, seed=0):
     for gi in range(n_games):
         w, b = rng.choice(players, 2, replace=False)
         we, be = ratings[w], ratings[b]
-        games.append({"game_id": f"g{gi}", "white_elo": we, "black_elo": be})
+        games.append({"game_id": f"g{gi}", "white": w, "black": b, "white_elo": we, "black_elo": be})
         for color, user, rt in (("white", w, we), ("black", b, be)):
             cpl = 80 - rt * 0.02 + rng.randn() * 4
             feat.append({
@@ -223,7 +225,9 @@ def test_run_evaluation_end_to_end(tmp_path):
                 "residual_by_band", "ablations", "mondrian_corrections", "source_commit"):
         assert key in a
     lr = pd.read_csv(csv)
-    assert "username" not in lr.columns and len(lr) > 0
+    assert "username" not in lr.columns and "game_id" not in lr.columns and len(lr) > 0
+    assert 0.0 <= r["cqr_one_game_per_player"]["coverage"] <= 1.0
+    assert r["single_game_deshrink"]["slope_lo"] <= r["single_game_deshrink"]["slope_hi"]
 
 
 def test_run_tail_study_smoke(tmp_path):
@@ -323,3 +327,35 @@ def test_partner_exposure_and_prior_interval_and_helpers():
     rows = _residual_by_length(np.array([10, 25, 25, 80]), np.array([100.0, -50.0, 50.0, 10.0]))
     assert [r["moves"] for r in rows] == ["0-19", "20-29", "60+"]
     assert rows[1]["mae"] == pytest.approx(50.0) and rows[1]["mean_residual"] == pytest.approx(0.0)
+
+
+def test_spearman_gives_tied_values_their_average_rank():
+    # standard Spearman of [1, 2, 3] vs [1, 1, 2] is 0.866; arbitrary tie-breaking would give 1.0
+    assert point_metrics([1, 2, 3], [1, 1, 2])["spearman"] == pytest.approx(np.sqrt(3) / 2)
+
+
+def test_slope_bootstrap_ci_brackets_the_true_slope():
+    rng = np.random.RandomState(0)
+    groups = np.repeat(np.arange(300), 4)
+    x = rng.normal(1500, 300, len(groups))
+    y = 0.8 * x + 300 + rng.normal(0, 50, len(groups)) + np.repeat(rng.normal(0, 30, 300), 4)
+    ci = slope_bootstrap_ci(x, y, groups, reps=200, seed=0)
+    assert ci["slope_lo"] < 0.8 < ci["slope_hi"]
+    assert ci["intercept_lo"] < 300 < ci["intercept_hi"]
+
+
+def test_one_game_per_player_cqr_uses_one_row_per_player_and_reaches_the_target():
+    rng = np.random.RandomState(1)
+
+    def players(n, k):
+        users = np.repeat([f"p{i}" for i in range(n)], k)
+        y = np.repeat(rng.normal(1500, 300, n), k) + rng.normal(0, 100, n * k)
+        interval = {"lower": y * 0 + 1500 - 200, "median": y * 0 + 1500, "upper": y * 0 + 1500 + 200}
+        return interval, y, users
+
+    ic, yc, uc = players(2000, 3)
+    it, yt, ut = players(2000, 3)
+    r = one_game_per_player_cqr(ic, yc, uc, it, yt, ut, alpha=0.1, two_sided=False, draws=5, seed=0)
+    assert r["n_calib_players"] == 2000 and r["n_test_players"] == 2000
+    assert 0.87 < r["coverage"] < 0.93
+    assert r["coverage_min"] <= r["coverage"] <= r["coverage_max"]

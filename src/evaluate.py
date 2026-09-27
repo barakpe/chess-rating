@@ -112,8 +112,8 @@ def _coverage_by_band(
 
 
 def _rank(a: np.ndarray) -> np.ndarray:
-    order = np.argsort(np.argsort(np.asarray(a, float)))
-    return order.astype(float)
+    """Ranks with ties sharing their average rank (ratings are integers, so ties are common)."""
+    return pd.Series(np.asarray(a, float)).rank(method="average").to_numpy()
 
 
 def point_metrics(y: np.ndarray, yhat: np.ndarray) -> dict[str, float]:
@@ -215,6 +215,67 @@ def cluster_bootstrap_mae(
         lo, hi = np.nanpercentile(d, [2.5, 97.5])
         out[f"{a} - {b}"] = {"diff": out[a]["mae"] - out[b]["mae"], "lo": float(lo), "hi": float(hi)}
     return out
+
+
+def slope_bootstrap_ci(pred: np.ndarray, y: np.ndarray, groups: np.ndarray, reps: int, seed: int
+                       ) -> dict[str, float]:
+    """Player-clustered bootstrap 95% CIs for the slope and intercept of the line true ~ pred.
+
+    Uses per-player sums (n, x, y, x², xy), so each replicate is a least-squares fit with whole
+    players resampled.
+    """
+    codes, uniques = pd.factorize(np.asarray(groups))
+    g = len(uniques)
+    x, t = np.asarray(pred, float), np.asarray(y, float)
+    sums = [np.bincount(codes, weights=w, minlength=g) for w in (np.ones_like(x), x, t, x * x, x * t)]
+    rng = np.random.RandomState(seed)
+    slopes, intercepts = np.empty(reps), np.empty(reps)
+    for r in range(reps):
+        w = np.bincount(rng.randint(0, g, g), minlength=g).astype(float)
+        n, sx, st, sxx, sxt = (w @ s_ for s_ in sums)
+        slopes[r] = (n * sxt - sx * st) / (n * sxx - sx * sx)
+        intercepts[r] = (st - slopes[r] * sx) / n
+    (s_lo, s_hi), (i_lo, i_hi) = np.percentile(slopes, [2.5, 97.5]), np.percentile(intercepts, [2.5, 97.5])
+    return {"slope_lo": float(s_lo), "slope_hi": float(s_hi),
+            "intercept_lo": float(i_lo), "intercept_hi": float(i_hi)}
+
+
+def _one_row_per_group(groups: np.ndarray, rng: np.random.RandomState) -> np.ndarray:
+    """Index of one random row per group."""
+    perm = rng.permutation(len(groups))
+    first = ~pd.Series(np.asarray(groups)[perm]).duplicated().to_numpy()
+    return perm[first]
+
+
+def one_game_per_player_cqr(
+    interval_cal: dict[str, np.ndarray], y_cal: np.ndarray, users_cal: np.ndarray,
+    interval_te: dict[str, np.ndarray], y_te: np.ndarray, users_te: np.ndarray,
+    alpha: float, two_sided: bool, draws: int, seed: int,
+) -> dict[str, float]:
+    """Split CQR with ONE random game per player, in calibration and in test.
+
+    With several games per player the calibration scores are not independent, so the standard
+    exchangeability argument behind the conformal guarantee does not apply to rows. Keeping one
+    game per player makes the scores independent across players (players are sampled
+    independently of each other), so the guarantee holds for "a random game of a new player".
+    Averaged over ``draws`` random choices of the game.
+    """
+    rng = np.random.RandomState(seed)
+    y_cal, y_te = np.asarray(y_cal, float), np.asarray(y_te, float)
+    cov, width, corr = [], [], []
+    for _ in range(draws):
+        ci = _one_row_per_group(users_cal, rng)
+        ti = _one_row_per_group(users_te, rng)
+        c = conformal_correction({k: v[ci] for k, v in interval_cal.items()}, y_cal[ci], alpha, two_sided)
+        iv = apply_conformal({k: v[ti] for k, v in interval_te.items()}, c)
+        cov.append(interval_coverage(y_te[ti], iv["lower"], iv["upper"]))
+        width.append(mean_interval_width(iv["lower"], iv["upper"]))
+        corr.append(c[0])
+    return {"coverage": float(np.mean(cov)), "coverage_min": float(np.min(cov)),
+            "coverage_max": float(np.max(cov)), "mean_width": float(np.mean(width)),
+            "correction": float(np.mean(corr)), "draws": draws,
+            "n_calib_players": int(pd.Series(users_cal).nunique()),
+            "n_test_players": int(pd.Series(users_te).nunique())}
 
 
 # ---------------------------------------------------------------------------------------
@@ -509,12 +570,14 @@ def scramble_columns(columns: list[str]) -> list[str]:
 
 
 def partner_exposure(test_df: pd.DataFrame, seen_game_ids: set[str]) -> np.ndarray:
-    """Mask of test rows whose GAME was also seen in model fitting (via the opponent's instance).
+    """Mask of test rows whose GAME the model was fit on: the opponent's row is in
+    ``seen_game_ids`` (the TRAINING split's games).
 
     The split is grouped by player, not by game, so a test player's opponent can sit in train.
     Game-level features (length, ECO, time control, phase lengths) are shared by both instances
-    and the opponent's label is close to this player's rating (matchmaking), so if the model could
-    memorise games, these rows would be predicted better than the rest.
+    and the opponent's label is close to this player's rating (matchmaking), so if the model had
+    memorised games, these rows would be predicted better than the rest. A narrow check of one
+    route, not a proof that no leakage exists.
     """
     return test_df["game_id"].isin(seen_game_ids).to_numpy()
 
@@ -568,9 +631,9 @@ def _residual_by_length(player_moves: np.ndarray, resid: np.ndarray) -> list[dic
 
 
 def _largest_residuals(test: pd.DataFrame, top_n: int) -> pd.DataFrame:
-    """The ``top_n`` worst single-game misses. Usernames are not written; the game id (a public
-    Lichess URL) is kept so a game can be looked up."""
-    cols = [c for c in ["game_id", "rating", "pred", "residual", "n_moves", "cpl_mean"] if c in test.columns]
+    """The ``top_n`` worst single-game misses. No identifiers are written (no username, no game
+    id): the table is committed, and a game id would lead back to the players."""
+    cols = [c for c in ["rating", "pred", "residual", "player_moves", "cpl_mean"] if c in test.columns]
     top = test.reindex(test["residual"].abs().sort_values(ascending=False).index).head(top_n)[cols].copy()
     hi = top["rating"] >= test["rating"].median()
     top["case"] = np.where(top["residual"] > 0,
@@ -704,9 +767,12 @@ def run_evaluation(
     params: dict[str, Any] | None = None,
     artifacts_path: str | Path | None = None,
     residuals_csv: str | Path | None = None,
+    sample_path: str | Path | None = None,
 ) -> dict[str, Any]:
     """Train + evaluate the improved model. ``params`` (optional) fits the "tuned" row with the given
-    LightGBM hyperparameters instead of running the Optuna search (``tune``)."""
+    LightGBM hyperparameters instead of running the Optuna search (``tune``). ``sample_path``
+    (optional): the reservoir-sample parquet, for a sensitivity check on the test rows that come
+    from the uniform game sample (i.e. without the cohort-only games)."""
     if tune and params:
         raise ValueError("pass either tune=True (Optuna search) or params (fixed hyperparameters), not both")
     source_commit = current_commit_hash()      # stamp the code that is about to run, not the code at the end
@@ -816,6 +882,25 @@ def run_evaluation(
     calib["pred"] = best_model.predict(calib[full_features])     # held-out: no model was fit on calib
     results["single_game_deshrink"] = dict(zip(("slope", "intercept"),
                                                fit_deshrink(calib["pred"].to_numpy(), y_cal)))
+    if reps:
+        results["single_game_deshrink"].update(
+            slope_bootstrap_ci(calib["pred"].to_numpy(), y_cal, calib["username"].to_numpy(), reps, seed))
+
+    # --- one game per player: the conformal setting without within-player dependence ---
+    results["cqr_one_game_per_player"] = one_game_per_player_cqr(
+        interval_cal, y_cal, calib["username"].to_numpy(), interval_raw, y_te, test["username"].to_numpy(),
+        alpha, cfg["model"]["cqr_two_sided"], int(ecfg.get("one_game_draws", 20)), seed)
+
+    # --- sensitivity: test rows from the uniform reservoir sample only (no cohort-only games) ---
+    if sample_path is not None and Path(sample_path).exists():
+        sample_ids = set(pd.read_parquet(sample_path, columns=["game_id"])["game_id"])
+        in_sample = test["game_id"].isin(sample_ids).to_numpy()
+        results["reservoir_only"] = {
+            "n_test": int(in_sample.sum()), "n_excluded": int((~in_sample).sum()),
+            "mae": _mae(y_te[in_sample], best_pred[in_sample]),
+            "baseline_mae": _mae(y_te[in_sample], baseline_pred[in_sample]),
+            "coverage": interval_coverage(y_te[in_sample], lo[in_sample], up[in_sample]),
+        }
 
     # --- aggregation: shifting-cohort curve, per-player, matched curve + K-aware recalibration ---
     test = test.copy()
@@ -851,8 +936,9 @@ def run_evaluation(
             "with": _band_mae_table(y_te, full_pred, bands),
         }
 
-    # Game-level leakage check: is a test row predicted better when its opponent's row was fit on?
-    seen = set(train["game_id"]) | set(val["game_id"])
+    # Game-level leakage check: is a test row predicted better when its opponent's row was fit on
+    # (is in the training split)? Validation rows only steer early stopping, so they count as unseen.
+    seen = set(train["game_id"])
     seen_mask = partner_exposure(test, seen)
     results["partner_check"] = {"n_seen": int(seen_mask.sum()), "n_unseen": int((~seen_mask).sum())}
 
@@ -979,7 +1065,15 @@ def _print_summary(r: dict[str, Any]) -> None:
     print(f"  prior (no-game) interval : width {pi['width']:.0f}, coverage {pi['coverage']*100:.1f}%")
     print(f"  band exact / adjacent    : {r['band_exact']*100:.1f}% / {r['band_adjacent']*100:.1f}%")
     sd = r["single_game_deshrink"]
-    print(f"  single-game slope true~pred (calib): {sd['slope']:.3f}")
+    print(f"  single-game slope true~pred (calib): {sd['slope']:.3f}"
+          + (f" [95% CI {sd['slope_lo']:.3f}, {sd['slope_hi']:.3f}]" if "slope_lo" in sd else ""))
+    og = r["cqr_one_game_per_player"]
+    print(f"  CQR, one game per player : {og['coverage']*100:.1f}% (range {og['coverage_min']*100:.1f}-"
+          f"{og['coverage_max']*100:.1f} over {og['draws']} draws), width {og['mean_width']:.0f}")
+    if "reservoir_only" in r:
+        ro = r["reservoir_only"]
+        print(f"  reservoir-only test rows : {ro['n_test']:,} (excl. {ro['n_excluded']:,}) MAE {ro['mae']:.1f}, "
+              f"baseline {ro['baseline_mae']:.1f}, coverage {ro['coverage']*100:.1f}%")
     if r["aggregation_curve"]:
         c = r["aggregation_curve"]
         print(f"  aggregation MAE K={c[0]['k']}->{c[-1]['k']} (shifting cohort): {c[0]['mae']:.1f} -> {c[-1]['mae']:.1f}")
@@ -1003,7 +1097,8 @@ def _print_summary(r: dict[str, Any]) -> None:
         s = r["scramble_ablation"]
         print(f"  scramble block: MAE with {s['with']['overall']:.1f}, without {s['without']['overall']:.1f}")
     pc = r["partner_check"]
-    print(f"  partner check: seen {pc['n_seen']:,} rows MAE {pc['mae_seen']:.1f} | unseen {pc['n_unseen']:,} MAE {pc['mae_unseen']:.1f}")
+    print(f"  partner check (opponent's row in train): {pc['n_seen']:,} rows MAE {pc['mae_seen']:.1f} | "
+          f"not {pc['n_unseen']:,} rows MAE {pc['mae_unseen']:.1f}")
     if "bootstrap" in r:
         b = r["bootstrap"]
         print("  bootstrap (player-clustered) 95% CIs:")
@@ -1029,6 +1124,7 @@ def _append_results_md(path: str | Path, r: dict[str, Any]) -> None:
         # Persist the winning hyperparameters — the Optuna study lives only in this process.
         lines.append(f"\n- best_params: `{r['best_params']}`")
     p, pp = r["point"], r["per_player"]
+    sd, og = r["single_game_deshrink"], r["cqr_one_game_per_player"]
     lines += [
         "",
         f"- median AE {p['median_ae']:.0f}, R² {p['r2']:.3f}, Spearman {p['spearman']:.3f}, "
@@ -1049,8 +1145,17 @@ def _append_results_md(path: str | Path, r: dict[str, Any]) -> None:
         f"- no-game (label-quantile) 90% interval: width {r['prior_interval']['width']:.0f} Elo, "
         f"coverage {r['prior_interval']['coverage']*100:.1f}%",
         f"- band accuracy: {r['band_exact']*100:.1f}% exact, {r['band_adjacent']*100:.1f}% adjacent",
-        f"- single-game calibration slope (true~pred, calib split): {r['single_game_deshrink']['slope']:.3f}",
+        f"- single-game calibration line (true~pred, calib split): slope {sd['slope']:.3f}"
+        + (f" [95% CI {sd['slope_lo']:.3f}, {sd['slope_hi']:.3f}]" if "slope_lo" in sd else "")
+        + f", intercept {sd['intercept']:.0f}",
+        f"- CQR with one game per player (calib and test, {og['draws']} draws): coverage {og['coverage']*100:.1f}% "
+        f"(range {og['coverage_min']*100:.1f}-{og['coverage_max']*100:.1f}), width {og['mean_width']:.0f}",
     ]
+    if "reservoir_only" in r:
+        ro = r["reservoir_only"]
+        lines.append(f"- reservoir-only test rows ({ro['n_test']}; {ro['n_excluded']} rows from cohort-only games "
+                     f"excluded): MAE {ro['mae']:.1f}, no-engine baseline {ro['baseline_mae']:.1f}, "
+                     f"coverage {ro['coverage']*100:.1f}%")
     if r["aggregation_curve"]:
         curve = ", ".join(f"K{c['k']}={c['mae']:.0f}" for c in r["aggregation_curve"])
         lines.append(f"- aggregation MAE (shifting cohort): {curve}")
@@ -1078,7 +1183,7 @@ def _append_results_md(path: str | Path, r: dict[str, Any]) -> None:
         lines.append(f"- scramble block ({s['n_dropped']} features): overall {s['without']['overall']:.1f} -> "
                      f"{s['with']['overall']:.1f} with it; tails {s['without']['tail']:.0f} -> {s['with']['tail']:.0f}")
     pc = r["partner_check"]
-    lines.append(f"- partner check: opponent's instance fit on ({pc['n_seen']} rows) MAE {pc['mae_seen']:.1f} vs "
+    lines.append(f"- partner check: opponent's row in the training split ({pc['n_seen']} rows) MAE {pc['mae_seen']:.1f} vs "
                  f"not ({pc['n_unseen']} rows) {pc['mae_unseen']:.1f}"
                  + (f"; seen - unseen {_fmt_ci(pc['diff_ci'])}" if "diff_ci" in pc else ""))
     if "bootstrap" in r:
@@ -1124,7 +1229,7 @@ def main() -> None:
     run_evaluation(cfg, args.features, args.games, tune=args.tune,
                    make_figures=not args.no_figures, results_md=(args.results_md or None),
                    params=params, artifacts_path=(args.artifacts or None),
-                   residuals_csv=(args.residuals_csv or None))
+                   residuals_csv=(args.residuals_csv or None), sample_path=cfg["outputs"]["blitz_sample"])
 
 
 if __name__ == "__main__":

@@ -72,7 +72,51 @@ _STRING_COLUMNS = [
 # --------------------------------------------------------------------------------------
 # Streaming — cheap string-level chunker (no chess.pgn object built here)
 # --------------------------------------------------------------------------------------
-def stream_game_chunks(path: str | Path) -> Iterator[tuple[str, str]]:
+class _PrefixedReader(io.RawIOBase):
+    """A raw byte stream that serves ``head`` first, then the rest of ``reader``."""
+
+    def __init__(self, head: bytes, reader: Any) -> None:
+        self._head, self._reader = head, reader
+
+    def readable(self) -> bool:
+        return True
+
+    def readinto(self, b: Any) -> int:
+        if self._head:
+            n = min(len(b), len(self._head))
+            b[:n] = self._head[:n]
+            self._head = self._head[n:]
+            return n
+        data = self._reader.read(len(b))
+        b[: len(data)] = data
+        return len(data)
+
+
+def fast_forward(reader: Any, utc_date: str, block_size: int = 1 << 24) -> bytes:
+    """Consume decompressed bytes up to the first game dated ``utc_date`` ("YYYY.MM.DD").
+
+    Returns the bytes from that game's first header line on (``b""`` if the date never occurs).
+    A plain byte search over large blocks — no line splitting, no parsing — so skipping most of a
+    monthly dump costs little more than decompressing it. A 64 KB carry-over between blocks keeps
+    a marker (or the header block before it) that straddles two blocks intact.
+    """
+    marker = f'[UTCDate "{utc_date}"]'.encode()
+    carry = b""
+    while True:
+        block = reader.read(block_size)
+        if not block:
+            return b""
+        buf = carry + block
+        hit = buf.find(marker)
+        if hit >= 0:
+            start = buf.rfind(b"\n\n[", 0, hit)        # the blank line that precedes a header block
+            if start >= 0:
+                return buf[start + 2:]
+            return buf[max(buf.rfind(b"[Event ", 0, hit), 0):]   # the very first game of the file
+        carry = buf[-(1 << 16):]
+
+
+def stream_game_chunks(path: str | Path, start_utc_date: str | None = None) -> Iterator[tuple[str, str]]:
     """Yield ``(headers_text, movetext_text)`` per game from a ``.pgn.zst`` dump, lazily
     decompressing and without invoking the (expensive) SAN parser.
 
@@ -84,10 +128,16 @@ def stream_game_chunks(path: str | Path) -> Iterator[tuple[str, str]]:
     blank lines, one or more movetext lines, then one or more blank lines before the next
     game's headers (or EOF). The state machine below is robust to multiple blank lines in
     either gap and to movetext spanning multiple lines.
+
+    ``start_utc_date`` (optional, "YYYY.MM.DD"): start at the first game played on that UTC day
+    (see ``fast_forward``) instead of at the top of the file. The dump is chronological.
     """
     dctx = zstandard.ZstdDecompressor()
     with open(path, "rb") as fh:
         reader = dctx.stream_reader(fh)
+        if start_utc_date is not None:
+            head = fast_forward(reader, start_utc_date)
+            reader = io.BufferedReader(_PrefixedReader(head, reader), buffer_size=1 << 20)
         text = io.TextIOWrapper(reader, encoding="utf-8", errors="replace")
 
         header_lines: list[str] = []
@@ -331,11 +381,17 @@ def run_ingest(
     cfg: dict[str, Any],
     cohort_output_path: str | Path | None = None,
     funnel_path: str | Path | None = None,
+    utc_date: str | None = None,
+    funnel_stage: str = "ingest",
 ) -> dict[str, int]:
     """Stream -> filter -> reservoir-sample -> parquet. Returns the data-funnel counts.
 
     ``funnel_path`` (optional): merge the counts plus the scanned UTC window into this JSON file
-    under the ``"ingest"`` key (see ``write_funnel``).
+    under the ``funnel_stage`` key (see ``write_funnel``).
+
+    ``utc_date`` (optional, "YYYY.MM.DD"): fast-forward to the first game of that UTC day and keep
+    only games dated that day (the confirmatory hold-out, ``src.holdout``). Games of other days met
+    after the fast-forward are counted as ``other_date`` and skipped.
 
     When ``cfg["player_cohort"]["enabled"]`` and ``cohort_output_path`` is given, ALSO writes a
     second parquet (same ``INGEST_COLUMNS`` schema) holding every filtered game of a small
@@ -369,6 +425,8 @@ def run_ingest(
     reservoir = Reservoir(cfg["sample_size"], cfg["random_seed"])
     cohort_rows: list[dict[str, Any]] = []
     funnel = {"scanned": 0, "blitz": 0, "candidate": 0, "has_eval": 0, "clean": 0, "cohort": 0}
+    if utc_date is not None:
+        funnel["other_date"] = 0
 
     def should_stop() -> bool:
         return max_scanned is not None and funnel["scanned"] >= max_scanned
@@ -379,12 +437,20 @@ def run_ingest(
     last_headers: str | None = None
 
     pbar = tqdm(desc="scanning games", unit="game")
-    for headers_text, movetext_text in stream_game_chunks(input_path):
+    for headers_text, movetext_text in stream_game_chunks(input_path, start_utc_date=utc_date):
         funnel["scanned"] += 1
         pbar.update(1)
         if first_headers is None:
             first_headers = headers_text
         last_headers = headers_text
+
+        if utc_date is not None:
+            dates = _UTC_DATE_RE.findall(headers_text)
+            if not dates or dates[-1] != utc_date:
+                funnel["other_date"] += 1
+                if should_stop():
+                    break
+                continue
 
         if string_is_blitz(headers_text, lo, hi):
             funnel["blitz"] += 1
@@ -469,9 +535,10 @@ def run_ingest(
         _write_parquet(cohort_rows, cohort_output_path)
     _print_funnel(funnel, output_path, cohort_output_path if cohort_active else None)
     if funnel_path is not None:
-        write_funnel(funnel_path, "ingest", {
+        write_funnel(funnel_path, funnel_stage, {
             "input": Path(input_path).name,
             "month": cfg.get("month"),
+            **({"utc_date": utc_date} if utc_date is not None else {}),
             "max_games_scanned": cfg.get("max_games_scanned"),
             "sample_size": cfg["sample_size"],
             "random_seed": cfg["random_seed"],
