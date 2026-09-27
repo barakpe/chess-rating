@@ -11,9 +11,12 @@ numbers are from `reports/results.md`.
 **Kaggle "Finding Elo" (Oct 2014 – Mar 2015).** The closest task definition: predict both
 players' Elo from one game, scored by MAE. The data were 50,000 over-the-board games between
 elite FIDE-rated players (25,000 train / 25,000 test), with a per-move Stockfish score (1 s per
-move) supplied. The winning private-leaderboard MAE was **155.8**, against **215.5** for the
-predict-the-mean benchmark. The top teams also matched openings against external game databases
-and re-ran Stockfish deeper. <https://www.kaggle.com/c/finding-elo>
+move) supplied. The winning private-leaderboard MAE was **155.8** (155.77762), against **215.5** (215.45112) for
+the "Mean Value Benchmark" (the training mean). The top teams also matched openings against
+external game databases and re-ran Stockfish deeper. <https://www.kaggle.com/c/finding-elo>; the
+live page no longer shows the final standings, so the two scores are from the private leaderboard
+as captured by the Internet Archive's Wayback Machine (snapshot of
+`kaggle.com/c/finding-elo/leaderboard/private`, late 2015).
 
 **RatingNet — M. Omori & P. Tadepalli, "Chess Rating Estimation from Moves and Clock Times Using
 a CNN-LSTM", Computers and Games (CG 2024), LNCS 15550, Springer 2025; arXiv:2409.11506.** The
@@ -45,7 +48,7 @@ Maia-2 could serve as a likelihood for rating inference, a direction we did not 
 | the rating labels | Lichess uses **Glicko-2** (Glickman, *J. Applied Statistics* 28(6), 2001); the dump stores it in the `WhiteElo`/`BlackElo` tags | we call the unit "Elo points" for brevity; a rating is provisional while its deviation is ≥ 110, a flag the PGN export does not carry |
 | gradient-boosted trees | Ke et al., "LightGBM", NeurIPS 2017 | point model + quantile models |
 | feature attribution | Lundberg & Lee, "A Unified Approach to Interpreting Model Predictions" (SHAP), NeurIPS 2017 | global importance |
-| split conformal prediction | Lei, G'Sell, Rinaldo, Tibshirani & Wasserman, JASA 2018 | finite-sample marginal coverage from a held-out calibration split |
+| split conformal prediction | Lei, G'Sell, Rinaldo, Tibshirani & Wasserman, JASA 2018 | marginal coverage from a held-out calibration split; finite-sample valid when calibration and test points are exchangeable. Our rows are games and a player contributes several, so we report empirical coverage and check one game per player (90.1%) |
 | conformalized quantile regression (CQR) | Romano, Patterson & Candès, NeurIPS 2019 | our 90% interval |
 | Mondrian (category-conditional) conformal prediction | Vovk, Gammerman & Shafer, *Algorithmic Learning in a Random World*, Springer 2005 | one CQR correction per predicted rating band |
 

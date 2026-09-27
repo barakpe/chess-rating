@@ -71,3 +71,35 @@ any change comes from the spread of ratings rather than from the model.
   forces a code fix, it is committed separately and described here.
 - The results are appended to `results.md`, written to `holdout_results.json`, and reported next
   to the development numbers in the README and the presentation, including if they are worse.
+
+## Outcome (added after the single scoring run, at 33171ec)
+
+Scored once on 124,403 rows of 67,744 new players (every eligible game of 2025-05-31: 123,276
+games; the 122,149 rows of development players dropped). Full entry: [`results.md`](results.md),
+numbers: [`holdout_results.json`](holdout_results.json). The dry run on the development test split
+reproduced every development number before the hold-out was scored.
+
+| | development test | hold-out |
+|---|--:|--:|
+| rows / players | 120,513 / 50,357 | 124,403 / 67,744 |
+| rating mean (sd) | 1645 (445) | 1562 (432) |
+| predict the development training mean | 364.8 | 358.9 |
+| no-engine baseline | 293.4 | 296.7 |
+| **full model (headline), MAE** | **239.1** | **243.9** [95% CI 242.4, 245.4] |
+| gain over the no-engine baseline | 54.2 [52.7, 55.8] | 52.9 [51.5, 54.2] |
+| tuned model | 237.2 | 241.9 |
+| 90% interval coverage, Mondrian (plain) | 89.9% (89.8%) | 89.4% (89.4%) |
+| coverage below 1200 / at 2000+ | 78% / 81% | 75% / 81% |
+| mean residual below 1200 / at 2000+ | +298 / −246 | +307 / −248 |
+| matched aggregation, K = 10: naive → recalibrated | 202 → 152 (1,260 players) | 205 → 167 (802 players) |
+| K = 5 recalibration gain | 24.4 [22.2, 26.8] | 20.8 [18.1, 23.3] |
+
+Against the expectations stated above: the gain over both baselines holds, coverage stays near
+90% on average and lower at the extremes, and the extreme-band bias has the same shape. The error
+is **about 5 Elo higher** than the development estimate. It is not a matter of rating spread (the
+mean predictor does *better* on the hold-out) or of the rating mix (weighting the hold-out's band
+MAEs by the development band shares gives the same 243.9): the MAE is 1.5–9 Elo higher within
+every rating band. Part of it is the ~1 Elo the development estimate gained from shared games; the
+rest is consistent with a population of less active players seen 26 days later (overall bias
++33 Elo, against −3 in development). The K-aware recalibration still helps on the hold-out, by a
+little less.

@@ -15,6 +15,14 @@ sample of ~59k instances; the 300k-game sample starts at n_test = 120,513. Featu
 means the run used uncommitted changes to `src/` or `config.yaml`. **The current numbers are the
 newest entries at the bottom**, produced by a full re-run from the raw dump.
 
+Every entry up to the confirmatory hold-out uses the same development test split, which was
+scored many times while the method took shape — so those are development estimates. The
+**confirmatory hold-out** entry (new players on 2025-05-31, protocol in `HOLDOUT_PROTOCOL.md`) is
+the one scored once. Two definitions changed at 33171ec: Spearman now gives tied ratings their
+average rank (earlier entries broke ties arbitrarily; the value is the same to three decimals), and
+the partner check counts only training-split games as "seen" (earlier entries also counted
+validation games, on which no model is fit).
+
 ## 39042c6 — baseline (no-engine features)
 n_train=47109, n_test=11753, features=game_plies, player_moves, n_captures, n_checks, result, time_control, eco
 
@@ -277,3 +285,49 @@ n_train=329353, n_calib=59124, n_test=120513, n_features=77
 - scramble block (8 features): overall 239.4 -> 239.1 with it; tails 297 -> 297
 - partner check: opponent's instance fit on (85006 rows) MAE 237.0 vs not (35507 rows) 237.5; seen - unseen -0.5 [95% CI -2.8, +1.5]
 - player-clustered bootstrap, MAE differences: baseline - full +54.2 [95% CI +52.7, +55.8]; full - tuned +2.0 [95% CI +1.8, +2.2]; no_engine - full +33.6 [95% CI +32.5, +34.6]; no_clock - full +9.1 [95% CI +8.5, +9.8]; no_opening - full +8.2 [95% CI +7.6, +8.8]; no_style - full +7.9 [95% CI +7.4, +8.4]; no_scramble - full +0.2 [95% CI +0.1, +0.4]
+
+## 33171ec — improved model
+n_train=329353, n_calib=59124, n_test=120513, n_features=77
+
+| stage | MAE | RMSE |
+|---|---|---|
+| no-engine baseline | 293.4 | — |
+| + engine/clock | 239.1 | 300.1 |
+
+- median AE 202, R² 0.545, Spearman 0.726, within 100/200 Elo 26%/50%, bias -3.4
+- per-player (all games averaged): **218.2** MAE over 50357 players
+- 90% interval coverage: raw 87.4% -> CQR(plain) **89.8%** (width 945 -> 999 Elo; correction lo=27.1, hi=27.1)
+- Mondrian CQR: **89.9%** (width 1001 Elo) — headline
+- coverage by band (headline=mondrian): 0-1200 78%, 1200-1400 96%, 1400-1600 98%, 1600-1800 98%, 1800-2000 95%, 2000-3000 81%
+- per-band coverage, plain/Mondrian: 0-1200 78%/78%, 1200-1400 95%/96%, 1400-1600 98%/98%, 1600-1800 99%/98%, 1800-2000 95%/95%, 2000-3000 80%/81%
+- no-game (label-quantile) 90% interval: width 1465 Elo, coverage 90.1%
+- band accuracy: 36.4% exact, 75.9% adjacent
+- single-game calibration line (true~pred, calib split): slope 0.961 [95% CI 0.946, 0.976], intercept 63
+- CQR with one game per player (calib and test, 20 draws): coverage 90.1% (range 89.9-90.2), width 983
+- reservoir-only test rows (119141; 1372 rows from cohort-only games excluded): MAE 239.1, no-engine baseline 293.4, coverage 89.9%
+- aggregation MAE (shifting cohort): K1=235, K2=209, K3=202, K5=200, K10=203, K20=217
+- matched aggregation (1260 test players with >= 10 games), naive -> K-aware recalibrated MAE: K1=251->241 (slope 0.99), K2=224->204 (slope 1.19), K3=216->187 (slope 1.27), K5=208->169 (slope 1.35), K10=202->152 (slope 1.41)
+- K=5 (5492 players with >= 5 games): single 244, naive avg 200, recalibrated 175 (naive - recal +24.4 [95% CI +22.2, +26.8]); bias single/naive/recal by band: 0-1200 +298/+300/+187, 1200-1400 +162/+160/+106, 1400-1600 +48/+48/+23, 1600-1800 -52/-52/-43, 1800-2000 -136/-137/-88, 2000-3000 -248/-246/-111
+- ablation (MAE↑ when dropped): engine +33.6, clock +9.1, opening +8.2, style +7.9
+- scramble block (8 features): overall 239.4 -> 239.1 with it; tails 297 -> 297
+- partner check: opponent's row in the training split (65639 rows) MAE 238.1 vs not (54874 rows) 240.4; seen - unseen -2.2 [95% CI -4.4, -0.2]
+- player-clustered bootstrap, MAE differences: baseline - full +54.2 [95% CI +52.7, +55.8]; no_engine - full +33.6 [95% CI +32.5, +34.6]; no_clock - full +9.1 [95% CI +8.5, +9.8]; no_opening - full +8.2 [95% CI +7.6, +8.8]; no_style - full +7.9 [95% CI +7.4, +8.4]; no_scramble - full +0.2 [95% CI +0.1, +0.4]
+
+## 33171ec — confirmatory hold-out (2025.05.31, new players, scored once)
+n_rows=124403, n_players=67744, rating mean 1562 (sd 432)
+
+| model | MAE |
+|---|---|
+| predict_mean (development training mean) | 358.9 [95% CI 355.8, 362.0] |
+| no-engine baseline | 296.7 [95% CI 294.7, 298.8] |
+| full model (headline) | 243.9 [95% CI 242.4, 245.4] |
+| tuned | 241.9 [95% CI 240.4, 243.4] |
+
+- differences (player-clustered bootstrap): mean - full +115.1 [95% CI +112.4, +117.8]; baseline - full +52.9 [95% CI +51.5, +54.2]; full - tuned +2.0 [95% CI +1.8, +2.2]
+- full model: RMSE 305.6, median AE 207, R² 0.499, Spearman 0.698, bias +33.4
+- 90% interval coverage: raw 87.1%, CQR(plain) **89.4%** (width 1007), Mondrian **89.4%** (width 1008); no-game interval 90.0% (width 1465)
+- per-band coverage, plain/Mondrian: 0-1200 76%/75%, 1200-1400 95%/95%, 1400-1600 98%/98%, 1600-1800 98%/98%, 1800-2000 95%/95%, 2000-3000 80%/81%
+- residual by band (full): 0-1200 +307 (n=27124), 1200-1400 +154 (n=18574), 1400-1600 +47 (n=21288), 1600-1800 -44 (n=20038), 1800-2000 -125 (n=17060), 2000-3000 -248 (n=20319)
+- calibration line true~pred: slope 0.928 [95% CI 0.919, 0.938], intercept 81
+- matched aggregation (802 players with >= 10 games), naive -> recalibrated MAE: K1=255->255, K2=228->219, K3=219->202, K5=211->183, K10=205->167
+- K=5 (3948 players with >= 5 games): single 254, naive 210, recalibrated 189 (naive - recal +20.8 [95% CI +18.1, +23.3])
