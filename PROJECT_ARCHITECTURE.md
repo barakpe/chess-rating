@@ -133,6 +133,13 @@ whose opponent's row was trained on predicted better?), and a single-game tail s
 (`--tail-study`: training reweighted toward rare ratings over 100-Elo bins, and the linear
 calibration line fit on held-out data, vs the plain model).
 
+**Confirmatory hold-out (`src/holdout.py`).** The development test split was scored many times
+while the method took shape, so it gives development estimates. The hold-out takes every eligible
+game of a later day (2025-05-31, reached by a byte-level fast-forward in `src.ingest`), keeps
+only the rows of players absent from the development data, refits the frozen models exactly as
+above and scores them once; a second run is refused. Protocol, committed before the data were
+extracted: `reports/HOLDOUT_PROTOCOL.md`.
+
 ---
 
 ## 4. Plotting conventions
