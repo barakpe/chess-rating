@@ -174,6 +174,9 @@ _REPO_ROOT = Path(__file__).resolve().parent.parent
 def current_commit_hash() -> str:
     """Short hash of the checked-out commit, for stamping results.md entries so a run can always
     be traced back to the exact code that produced it. ``"unknown"`` outside a git checkout.
+
+    Suffixed ``-dirty`` when ``src/`` or ``config.yaml`` has uncommitted changes (including new,
+    untracked files), because then the hash alone does not identify the code that produced the numbers.
     """
     import subprocess
 
@@ -182,7 +185,13 @@ def current_commit_hash() -> str:
             ["git", "rev-parse", "--short", "HEAD"], cwd=_REPO_ROOT,
             capture_output=True, text=True, check=True,
         )
-        return out.stdout.strip()
+        commit = out.stdout.strip()
+        status = subprocess.run(   # modified, staged OR untracked files under src/ or config.yaml
+            ["git", "status", "--porcelain", "--", "src", "config.yaml"], cwd=_REPO_ROOT,
+            capture_output=True, text=True, check=True,
+        ).stdout
+        dirty = any(line and not line.endswith(".pyc") for line in status.splitlines())
+        return f"{commit}-dirty" if dirty else commit
     except Exception:
         return "unknown"
 
@@ -297,7 +306,8 @@ def band_sample_weights(ratings: np.ndarray, bands: list[int], strength: float =
 
     The natural rating distribution is bell-shaped, so an MAE learner shrinks the tails toward the
     centre. Weighting each instance by ``(1 / band_frequency) ** strength`` makes the model value
-    the tails more, trading a little central accuracy for less tail bias. ``strength=0`` -> uniform.
+    rare ratings more. Use FINE bins (the tail study uses 100-Elo bins): with wide bands whose outer
+    bands are large, this would down-weight the tails instead. ``strength=0`` -> uniform.
     """
     idx = to_bands(ratings, bands)
     counts = np.bincount(idx, minlength=len(bands) - 1).astype(float)
@@ -405,9 +415,10 @@ def conformal_correction_by_band(
     redoing that sort-and-quantile work.
 
     CAVEAT: because banding is by PREDICTED median and the point model shrinks predictions toward the
-    mean, games whose TRUE rating sits in an extreme band often have a predicted median that lands in
-    an interior band. Mondrian CQR therefore improves coverage conditional on the PREDICTION, which in
-    turn markedly improves — but cannot guarantee — coverage conditional on the TRUE band.
+    mean, games whose TRUE rating sits in an extreme band usually get a predicted median in an
+    interior band, where the correction is set mostly by mid-rated players. Mondrian CQR therefore
+    targets coverage conditional on the PREDICTION; it does not target coverage conditional on the
+    TRUE band (measured on 2025-05: per-true-band coverage is essentially unchanged vs plain CQR).
     """
     y = np.asarray(y, float)
     band_idx = predicted_bands(interval["median"], bands)

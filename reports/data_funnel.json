@@ -1,0 +1,61 @@
+{
+  "ingest": {
+    "input": "lichess_db_standard_rated_2025-05.pgn.zst",
+    "month": "2025-05",
+    "max_games_scanned": 15000000,
+    "sample_size": 300000,
+    "random_seed": 42,
+    "scan_window_utc": {
+      "first": "2025.05.01 00:00:06",
+      "last": "2025.05.05 21:06:40"
+    },
+    "scanned": 15000000,
+    "blitz": 6977568,
+    "candidate": 6939385,
+    "has_eval": 648594,
+    "clean": 647983,
+    "cohort": 6117,
+    "sampled": 300000
+  },
+  "clean": {
+    "sample": 300000,
+    "cohort": 6117,
+    "input": 306117,
+    "deduped": 303289,
+    "cleaned": 303289,
+    "instances": 606578,
+    "players": 251785
+  },
+  "holdout_ingest": {
+    "input": "lichess_db_standard_rated_2025-05.pgn.zst",
+    "month": "2025-05",
+    "utc_date": "2025.05.31",
+    "max_games_scanned": null,
+    "sample_size": 100000000,
+    "random_seed": 42,
+    "scan_window_utc": {
+      "first": "2025.05.31 00:00:00",
+      "last": "2025.05.31 23:59:57"
+    },
+    "scanned": 2901523,
+    "blitz": 1342658,
+    "candidate": 1335628,
+    "has_eval": 123395,
+    "clean": 123276,
+    "cohort": 0,
+    "other_date": 151,
+    "sampled": 123276
+  },
+  "holdout_prepare": {
+    "games_ingested": 123276,
+    "games_input": 123276,
+    "games_deduped": 123276,
+    "games_cleaned": 123276,
+    "instances": 246552,
+    "instances_of_development_players": 122149,
+    "instances_kept": 124403,
+    "players_kept": 67744,
+    "games_with_a_kept_instance": 91287,
+    "feature_rows": 124403
+  }
+}

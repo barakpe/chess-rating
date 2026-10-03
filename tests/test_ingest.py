@@ -313,3 +313,66 @@ def test_prefilter_end_to_end_via_run_ingest(tmp_path):
     assert funnel["clean"] == 1
     df = pd.read_parquet(out)
     assert list(df["game_id"]) == ["https://lichess.org/prefiltergood"]
+
+
+def test_ingest_writes_funnel_json_with_scan_window(tmp_path):
+    import json
+
+    out = tmp_path / "blitz_sample.parquet"
+    funnel_path = tmp_path / "data_funnel.json"
+    funnel = run_ingest(FIXTURE, out, _cfg(), funnel_path=funnel_path)
+
+    data = json.loads(funnel_path.read_text(encoding="utf-8"))
+    rec = data["ingest"]
+    for key, value in funnel.items():
+        assert rec[key] == value                     # same counts as the returned funnel
+    assert rec["input"] == FIXTURE.name
+    assert rec["scan_window_utc"]["first"].startswith("2025.05.01")
+    assert rec["scan_window_utc"]["last"] is not None
+
+
+def test_header_timestamp():
+    from src.ingest import header_timestamp
+
+    headers = '[Event "x"]\n[UTCDate "2025.05.03"]\n[UTCTime "07:08:09"]\n'
+    assert header_timestamp(headers) == "2025.05.03 07:08:09"
+    assert header_timestamp('[Event "x"]\n') is None
+    assert header_timestamp(None) is None
+
+
+def _dated_games(dates):
+    return "".join(
+        f'[Event "G{i}"]\n[Site "https://lichess.org/g{i}"]\n[UTCDate "{d}"]\n[Result "1-0"]\n\n1. e4 e5 1-0\n\n'
+        for i, d in enumerate(dates))
+
+
+def test_stream_game_chunks_fast_forwards_to_a_utc_date(tmp_path):
+    path = _zst_path(tmp_path, _dated_games(["2025.05.01", "2025.05.01", "2025.05.31", "2025.05.30", "2025.05.31"]))
+    chunks = list(stream_game_chunks(path, start_utc_date="2025.05.31"))
+    assert [h.split('"')[1] for h, _ in chunks] == ["G2", "G3", "G4"]   # from the first game of the day on
+    assert all("1. e4 e5 1-0" in m for _, m in chunks)
+    assert [h.split('"')[1] for h, _ in stream_game_chunks(path, start_utc_date="2025.05.01")][0] == "G0"
+    assert list(stream_game_chunks(path, start_utc_date="2025.06.01")) == []
+
+
+def test_fast_forward_finds_a_marker_across_small_blocks():
+    import io
+
+    from src.ingest import fast_forward
+
+    data = _dated_games(["2025.05.01", "2025.05.01", "2025.05.31"]).encode()
+    head = fast_forward(io.BytesIO(data), "2025.05.31", block_size=7)
+    assert head.startswith(b'[Event "G2"]')
+
+
+def test_run_ingest_keeps_only_the_requested_utc_date(tmp_path):
+    import json
+
+    same = run_ingest(FIXTURE, tmp_path / "a.parquet", _cfg(), utc_date="2025.05.01",
+                      funnel_path=tmp_path / "f.json", funnel_stage="holdout_ingest")
+    plain = run_ingest(FIXTURE, tmp_path / "b.parquet", _cfg())
+    assert same["clean"] == plain["clean"] and same["other_date"] == 0
+    rec = json.loads((tmp_path / "f.json").read_text(encoding="utf-8"))["holdout_ingest"]
+    assert rec["utc_date"] == "2025.05.01"
+    none = run_ingest(FIXTURE, tmp_path / "c.parquet", _cfg(), utc_date="2025.05.02")
+    assert none["scanned"] == 0 and none["clean"] == 0
