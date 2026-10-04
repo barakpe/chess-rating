@@ -79,17 +79,21 @@ scores 293.4, which is the baseline of the 54-Elo gain below.)
 - **The full feature set** (move quality, clock, game structure) cuts the error by **54 Elo** (95%
   CI 52.7–55.8, player-clustered bootstrap); removing the 50 move-quality features costs 34.
   R² 0.55, Spearman 0.73, within 200 Elo half of the time. Tuning adds 2.0 more (CI 1.8–2.2).
-- **Honest uncertainty:** split CQR turns an under-covering 87.4% raw interval into **89.8%**
-  empirical coverage (target 90%); with one game per player, where the conformal guarantee applies,
-  it is 90.1%. The interval is ~1,000 Elo wide — one game is weak evidence — but 32%
-  narrower than the no-game interval (1,465) at the same coverage. It under-covers the extreme
-  bands (78% below 1200, 80% at 2000+; together 40% of test games).
+- **Honest uncertainty:** conformalized quantile regression with one correction per predicted
+  rating band (Mondrian CQR) turns an under-covering 87.4% raw interval into **89.9%** empirical
+  coverage (target 90%; plain CQR 89.8%), and 89.4% on the hold-out. A separate check with one
+  game per player (plain CQR), which removes the dependence between a player's games, gives 90.1%;
+  the finite-sample guarantee also assumes exchangeable players. The interval is ~1,000 Elo wide —
+  one game is weak evidence — but 32% narrower than the no-game interval (1,465) at the same
+  coverage. It under-covers the extreme bands (78% below 1200, 81% at 2000+; together 40% of test
+  games).
 - **Regression to the mean at the extremes:** below-1200 players are over-predicted by +298 on
-  average, 2000+ players under-predicted by −246. At the single-game level this is the cost of weak
-  evidence: there is no leftover linear shrinkage (slope of true on predicted 0.96, 95% CI
+  average, 2000+ players under-predicted by −246. At the single-game level the explanation most
+  consistent with our checks is weak evidence, and the fixes we tested did not remove the bias
+  without costs elsewhere: there is no leftover linear shrinkage (slope of true on predicted 0.96, 95% CI
   0.946–0.976); up-weighting rare
   ratings moves error from the middle to the tails (overall MAE 239.1 → 245.6); scramble features add
-  ~0; Mondrian intervals do not restore extreme-band coverage.
+  0.24 Elo (95% CI 0.09–0.40), too little to matter; Mondrian intervals do not restore extreme-band coverage.
 - **Several games, combined correctly:** for players with ≥ 10 test games, averaging 10 predictions
   gives MAE 202; recalibrating that average for K (fit on held-out players) gives **152** (error
   against the player's average rating over those games; these are the most active players). At K = 5
@@ -277,8 +281,10 @@ contract: `NaN` = not observable, `0` = a true zero; a phase that did not occur 
   export does not mark them, so they cannot be identified reliably. Symptoms: a spike at exactly 1500
   (the starting rating), and large rating gaps (beyond ±250) that the lower-rated player wins more often.
 - **Blitz only.** Rapid and classical are not studied.
-- **Interval coverage is empirical and marginal:** ~90% on average over test games (90.1% with one
-  game per player, where the conformal guarantee applies), 78–80% in the extreme bands.
+- **Interval coverage is empirical and marginal:** ~90% on average over test games (89.9% with
+  Mondrian CQR, 89.4% on the hold-out; 90.1% in a one-game-per-player check, which removes the
+  within-player dependence but does not by itself establish the guarantee), 75–81% in the extreme
+  bands.
 - **Development test reuse.** The development test split was scored many times while the method
   took shape; the pre-registered hold-out is the clean check.
 - **A small leak through shared games** (about 2 Elo on the rows whose opponent was trained on,
